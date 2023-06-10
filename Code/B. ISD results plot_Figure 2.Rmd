@@ -1,0 +1,70 @@
+---
+title: "ISD results plot/Figure 2"
+author: "Daniel Skubleny"
+date: '2023-01-10'
+output: html_document
+---
+
+```{r}
+isd_final_results <- read.csv("isd_final_results.csv", stringsAsFactors=TRUE)
+
+isd_final_results_long = tidyr::gather(isd_final_results, Model, Cindex, MTLR:VAECox)
+isd_final_results_long$Model = as.factor(isd_final_results_long$Model)
+
+isd_summary = summarySE(isd_final_results_long, measurevar="Cindex", groupvars = c("Cancer", "Model"))
+isd_summary$lower = isd_summary$Cindex - isd_summary$ci
+isd_summary$upper = isd_summary$Cindex + isd_summary$ci
+
+isd_stat =isd_final_results_long %>%
+  group_by(Cancer) %>%
+  rstatix::t_test(data =., Cindex ~ Model) %>%
+  rstatix::adjust_pvalue(method = "bonferroni") %>%
+  rstatix::add_significance("p.adj")
+
+ cindex_plot = ggplot(rice, aes(x = Cancer, y=Cindex, fill = Model)) + 
+  geom_bar(stat="identity",position="dodge", colour="black", alpha=0.9) + 
+  geom_errorbar(aes(ymin = lower, ymax = upper), position = position_dodge(width=0.9), width = 0.4) +
+  scale_y_continuous(name="C-Index", limits = c(0,1)) +
+  xlab("Organ of Origin") +
+  scale_fill_manual(name = "Model",label=c("NMF-MTLR", "VAECox"), values = c("#377EB8", "#FF7F00")) + 
+  theme_classic()  + 
+  theme(axis.text.x = element_text(colour="black", size = 14,angle = 45, hjust=1)) +
+  theme(axis.text.y = element_text(colour="black", size=14)) +
+  theme(plot.title = element_text(colour="black", size=14,hjust = 0)) +
+  theme(axis.title.x = element_text(color = "black", size = 14)) +
+  theme(axis.title.y = element_text(colour="black", size=14)) +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(color = "black", size = 14), 
+        legend.position = c(0.82,0.87), 
+        legend.background = element_rect(size=0.5, linetype="solid", 
+                                  colour ="black"))
+ 
+ggsave("cindex_plot.svg",cindex_plot, height = 6, width = 12 )
+```
+
+```{r}
+x = c("VAECox", "NMF-MTLR")
+y = c(0.638,0.733)
+df <- data.frame(x, y)
+
+micro_cindex_plot = ggplot(df, aes(x= x, y=y, fill=x,colour=x)) +
+  geom_bar(stat="identity",position="dodge", alpha=0.75, size=1.5, width = 0.75) + 
+  scale_y_continuous(name="Micro-Averaged C-Index", limits = c(0,1)) +
+  xlab("Model") +
+  scale_fill_manual(name = "Model",label=c("NMF-MTLR", "VAECox"), values = c("#377EB8", "#FF7F00")) + 
+  scale_colour_manual(name = "Model",label=c("NMF-MTLR", "VAECox"), values = c("#377EB8", "#FF7F00")) +
+  theme_classic()  + 
+  theme(axis.text.x = element_text(colour="black", size = 14,angle = 45, hjust=1)) +
+  theme(axis.text.y = element_text(colour="black", size=14)) +
+  theme(plot.title = element_text(colour="black", size=14,hjust = 0)) +
+  theme(axis.title.x = element_text(color = "black", size = 14)) +
+  theme(axis.title.y = element_text(colour="black", size=14)) +
+  theme(legend.title = element_blank(),
+        legend.position = "none")
+                           
+
+ggsave("micro_cindex_plot.svg",micro_cindex_plot, height = 3.5, width = 2.25 )
+ggsave("micro_cindex_plot.png",micro_cindex_plot, height = 3.5, width = 2.25,dpi = 600 )
+
+```
+

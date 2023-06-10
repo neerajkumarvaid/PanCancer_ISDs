@@ -1,0 +1,1793 @@
+---
+title: "Gams and GSEA"
+author: "Daniel Skubleny"
+date: '2023-01-11'
+output: html_document
+---
+#Libraries
+```{r}
+library(mgcv)
+library(mgcViz)
+library(pheatmap)
+library(MASS)
+library(RColorBrewer)
+library(Rmisc)
+library(AnnotationDbi)
+library(BiocManager)
+library(plyr)
+library(dplyr)
+library(grid)
+
+```
+#Import and form dataframes for this analysis
+```{R}
+survival_data <- read.csv("NMF_survival_data_final.csv", row.names=1)
+patient_data <- read.csv("nmf_coefficient_rank100_PanCancer_10274cases.csv")
+
+survival_combo = merge(patient_data,survival_data, by="Patient_ID")
+
+library(readxl)
+estimated_survival <- read_excel("Predicted_MTLR_Medians_7920patients_Latest.xlsx")
+estimated_survival = dplyr::select(estimated_survival, c("Patient_ID", "Predicted Median Time"))
+colnames(estimated_survival) = c("Patient_ID", "survival_time")
+
+survival_combo = merge(survival_combo,estimated_survival, by="Patient_ID" )
+
+```
+
+
+#Scale Factors 
+```{r}
+survival_combo_scale = scale(survival_combo[,c(3:102)])
+survival_combo_scale = as.data.frame(survival_combo_scale)
+colnames(survival_combo_scale) = paste(colnames(survival_combo_scale) ,'scaled', sep="")
+survival_combo = cbind(survival_combo,survival_combo_scale)
+
+survival_combo$integer_time = survival_combo$survival_time
+survival_combo$integer_time = as.integer(survival_combo$integer_time)
+survival_combo$integer_time = survival_combo$integer_time+1
+
+survival_combo$log_survival = log10(survival_combo$survival_time)
+
+hist(survival_combo$survival_time)
+
+```
+
+#GLM models
+#MODEL BUILDING
+```{r}
+#The purpose here is to examine the effectiveness of generalized linear models and assess which distribution best matches this data. 
+fm_bases = (paste(colnames(survival_combo[,c(126:225)]), sep = "", collapse = ' + '))
+fm_bases = as.formula(paste('integer_time ~',fm_bases))
+nb_model_base1 =glm.nb(fm_bases, data = survival_combo)
+
+MuMIn::AICc(nb_model_base1)
+fm_bases = (paste(colnames(survival_combo[,c(126:225)]), sep = "", collapse = ' + '))
+fm_bases =paste(fm_bases, 'Age',sep = " + ")
+fm_bases = as.formula(paste('integer_time ~',fm_bases))
+nb_model_base2 =glm.nb(fm_bases, data = survival_combo)
+
+MuMIn::AICc(nb_model_base2)
+
+fm_base = (paste(colnames(survival_combo[,c(126:225)]), sep = "", collapse = ' + '))
+fm_base =paste(fm_base, 'Type',sep = " + ")
+fm_base =paste(fm_base, 'Age',sep = " + ")
+fm_base =paste(fm_base, 'Sex',sep = " + ")
+fm_base = as.formula(paste('integer_time ~',fm_base))
+
+base = glm(fm_base, data = survival_combo)
+MuMIn::AICc(base)
+
+gamma_model = glm(fm_base, data = survival_combo, family=Gamma())
+poisson_model = glm(fm_base, data = survival_combo, family=poisson(link = "log"))
+quasipoisson_model = glm(fm_base, data = survival_combo, family=quasipoisson(link = "log"))
+inverse_gaussian_model = glm(fm_base, data = survival_combo, family=inverse.gaussian(link = "1/mu^2")) 
+
+
+```
+#Negative Binomial model
+
+```{r}
+nb_model =glm.nb(fm_base, data = survival_combo)
+
+dummy <- MASS::rnegbin(fitted(nb_model), theta = 3.8552)
+ks.test(dummy, survival_combo$integer_time)
+#They do not come from same distribution. Does not match negative binomial 
+
+dummy_poisson = rpois(7000, fitted(poisson_model))
+ks.test(dummy_poisson, survival_combo$integer_time)
+#Does not match poisson distribution. 
+
+MuMIn::AICc(gamma_model)
+MuMIn::AICc(poisson_model)
+MuMIn::AICc(inverse_gaussian_model)
+MuMIn::AICc(nb_model)
+#Choose negative binomial = lowest corrected AIC
+
+nb_coef = summary(nb_model)
+nb_coef = as.data.frame(nb_coef[["coefficients"]])
+nb_coef$significant = nb_coef$`Pr(>|z|)` < 0.05
+
+nb_coef = tibble::rownames_to_column(nb_coef, "factor")
+nb_coef = nb_coef %>%  filter(grepl("scale",factor))
+nb_coef$factor = gsub('.{6}$', '', nb_coef$factor)
+
+#Extract significant terms
+sig_names_nb = data.frame(nb_coef[nb_coef$significant=="TRUE",]$factor)
+colnames(sig_names_nb) = "factor"
+nb_coef = merge(nb_coef,sig_names_nb, by="factor", all=TRUE)
+
+nb_factors = sig_names_nb$factor 
+
+```
+
+#Generalized Additive Models
+```{r}
+#First model uses cubic splines and gaussian distribution. This is a base model
+fm <- (paste('s(', names(survival_combo[,c(126:225)]), ', bs = "cs")', sep = "", collapse = ' + '))
+fm =paste(fm, 'Type',sep = " + ")
+fm =paste(fm, 's(Age, bs="cs")',sep = " + ")
+fm =paste(fm, 'Sex',sep = " + ")
+fm = as.formula(paste('survival_time ~',fm))
+
+mod_bam1 = bam(fm, data = survival_combo, discrete=TRUE)
+mod_bam1_summary = summary(mod_bam1)
+
+plot(mod_bam1,residuals=TRUE, seWithMean = TRUE, shift = coef(mod_bam1)[1],select = 21)
+
+mod_bam1_viz <- getViz(mod_bam1)
+plot( sm(mod_bam1_viz, 23) )
+plot( sm(mod_bam1_viz, 76) )
+
+###Second model uses negative binomial distribution, adaptive splines with Restricted Maximum Likelihood. 
+fm_knots <- (paste('s(', names(survival_combo[,c(126:225)]), ',k=15, bs = "ad")', sep = "", collapse = ' + '))
+fm_knots =paste(fm_knots, 'Type',sep = " + ")
+fm_knots =paste(fm_knots, 's(Age,k=20, bs="ad")',sep = " + ")
+fm_knots =paste(fm_knots, 'Sex',sep = " + ")
+fm_knots = as.formula(paste('integer_time ~',fm_knots))
+
+mod_bam1_nb = bam(fm_knots, data = survival_combo, family = nb(link = "log"), method="fREML", discrete=TRUE)
+
+### Third model. This is the final model used in the paper. Modified Knots compared to prior model and used cubic splines
+fm_knots <- (paste('s(', names(survival_combo[,c(126:225)]), ',k=20, bs = "cs")', sep = "", collapse = ' + '))
+fm_knots =paste(fm_knots, 'Type',sep = " + ")
+fm_knots =paste(fm_knots, 's(Age,k=25, bs="cs")',sep = " + ")
+fm_knots =paste(fm_knots, 'Sex',sep = " + ")
+fm_knots = as.formula(paste('integer_time ~',fm_knots))
+
+mod_bam2_nb = bam(fm_knots, data = survival_combo, family = nb(link = "log"), method="fREML", discrete=TRUE)
+mod_bam2_nb_summary = summary(mod_bam2_nb)
+
+#The partial effects for the supplementary figures is below
+```
+#Examine GAM model - 
+```{r}
+#####
+#Visualize model, assess concurvity and filter significant terms. 
+
+concurv_gam = concurvity(mod_bam2_nb)
+
+write.csv(t(concurv_mod_bam2_nb_full), "concurv_gam_full.csv")
+
+mod_bam2_nb_viz <- getViz(mod_bam2_nb)
+
+set.seed(99)
+check(mod_bam2_nb_viz)
+
+anova(nb_model, mod_bam2_nb, test="Chisq")
+AICc(nb_model)
+AICc(mod_bam2_nb)
+AICc(nb_model) -  AICc(mod_bam2_nb)
+
+smooths_table = mod_bam2_nb_summary$s.table
+smooths_table = as.data.frame(smooths_table)
+
+smooths_table$significant = smooths_table$`p-value`<0.05
+smooths_table = tibble::rownames_to_column(smooths_table, "term")
+smooths_table = smooths_table %>%  filter(grepl("F",term))
+smooths_table$term = gsub(".*F","F",smooths_table$term)
+smooths_table$term = gsub('.{7}$', '', smooths_table$term)
+
+nonlinear_factors = filter(smooths_table, significant==TRUE)
+nonlinear_factors = nonlinear_factors$term
+
+#Visulize edf effects for smooths 
+plot(as.factor(smooths_table$term),smooths_table$edf)
+select_smooths = filter(smooths_table, smooths_table$edf>2e-02)
+#33 factors with reasonable edf
+```
+#Term partial effect plots
+#AGE PLOT
+```{r}
+age_data = plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, 
+                seWithMean = FALSE, 
+                shade=T, shade.col = "#6BAED6",
+                shift = (coef(mod_bam2_nb)[1]), 
+                trans=exp,select = 101,
+                ylim=c(800,1300))
+abline(h=1015.448 , col="blue")
+age_plot_data = list(age_data[[101]]$x, age_data[[101]]$se, age_data[[101]]$fit)
+age_plot_data = as.data.frame(age_plot_data)
+colnames(age_plot_data) = c("x", "se", "fit")
+age_plot_data$se_upper = age_plot_data$fit + (age_plot_data$se)
+age_plot_data$se_lower = age_plot_data$fit - (age_plot_data$se)
+age_plot_data$se_upper = exp(age_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+age_plot_data$se_lower = exp(age_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+age_plot_data$fit = exp((age_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+age_gam_plot = ggplot(age_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+   geom_vline(xintercept = quantile(survival_combo$Age, probs = 0.90,na.rm=TRUE), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + 
+  geom_line(colour="black", size=1) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=Age),size=0.5, alpha=0.1, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+  scale_x_continuous(name="Age", breaks = c(10,30,50,70,90), labels=c("10", "30", "50", "70", "90"))+
+  ylab("Partial Effect of Age\non Survival Time (Days)") +
+  ggtitle("Survival time vs. Age") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16))
+ggsave("age_gam_plot.svg", age_gam_plot, width =4, height=3)
+
+
+#################################################
+#################################################
+```
+#parametric type plot 
+```{r}
+parametric_terms = as.data.frame(mod_bam2_nb_summary$p.table)
+parametric_terms$se_upper = parametric_terms$Estimate + (1.96 * parametric_terms$`Std. Error`)
+parametric_terms$se_lower = parametric_terms$Estimate - (1.96 * parametric_terms$`Std. Error`)
+parametric_terms$se_upper = exp(parametric_terms$se_upper + ((coef(mod_bam2_nb)[1])))
+parametric_terms$se_lower = exp(parametric_terms$se_lower + ((coef(mod_bam2_nb)[1])))
+parametric_terms$Estimate = exp((parametric_terms$Estimate)+ ((coef(mod_bam2_nb)[1])))
+parametric_terms_type = tibble::rownames_to_column(parametric_terms, "Type")
+parametric_terms_type = parametric_terms_type[c(2:20),]
+BLCA = data.frame("TypeBLCA", exp((coef(mod_bam2_nb)[1])),exp((coef(mod_bam2_nb)[1])),exp((coef(mod_bam2_nb)[1])),exp((coef(mod_bam2_nb)[1])),exp((coef(mod_bam2_nb)[1])),exp((coef(mod_bam2_nb)[1])))
+colnames(BLCA) = colnames(parametric_terms_type)
+parametric_terms_type = rbind(BLCA, parametric_terms_type)
+parametric_terms_type$Type = str_remove_all(parametric_terms_type$Type, "Type")
+
+parametric_terms_plot = ggplot(parametric_terms_type, aes(x=reorder(Type, +Estimate), y=Estimate)) + 
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin=se_lower, ymax=se_upper), width=.4,
+                 position=position_dodge(.9),
+                size=1) +
+  ylab("Partial Effect of Cancer type on\nSurvival Time (Days)") +
+  xlab("Cancer Type") +
+  geom_hline(yintercept = exp((coef(mod_bam2_nb)[1])), linetype=2, alpha = 0.5) +
+  coord_flip() +
+  theme_bw() +
+  theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+
+ggsave("parametric_terms_plot.svg", parametric_terms_plot, width =6, height=6)
+
+
+#################################################
+#################################################
+```
+#F92 plot
+```{r}
+
+f92_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 92, ylim=c(500, 1200)) 
+
+f92_plot_data = list(f92_data[[92]]$x, f92_data[[92]]$se, f92_data[[92]]$fit)
+f92_plot_data = as.data.frame(f92_plot_data)
+colnames(f92_plot_data) = c("x", "se", "fit")
+f92_plot_data$se_upper = f92_plot_data$fit + (f92_plot_data$se)
+f92_plot_data$se_lower = f92_plot_data$fit - (f92_plot_data$se)
+f92_plot_data$se_upper = exp(f92_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f92_plot_data$se_lower = exp(f92_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f92_plot_data$fit = exp((f92_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f92_gam_plot = ggplot(f92_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F92scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F92scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 92 (Z-score normalized)")+
+  ylab("Partial Effect of F92 on\nSurvival Time (Days)") +
+  ggtitle("Multivariable relationship of survival time vs. F92") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f92_gam_plot.svg", f92_gam_plot, width =6, height=3.5)
+
+
+f92_supp_plot = ggplot(f92_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F92scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F92scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 92 Z-score")+
+  ylab("Partial Effect of F92 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F92") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f92_supp_plot.svg", f92_supp_plot, width =4, height=3)
+
+#################################################
+#################################################
+```
+#F43 plot
+```{r}
+
+f43_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 43, ylim=c(500, 1200)) 
+
+f43_plot_data = list(f43_data[[43]]$x, f43_data[[43]]$se, f43_data[[43]]$fit)
+f43_plot_data = as.data.frame(f43_plot_data)
+colnames(f43_plot_data) = c("x", "se", "fit")
+f43_plot_data$se_upper = f43_plot_data$fit + (f43_plot_data$se)
+f43_plot_data$se_lower = f43_plot_data$fit - (f43_plot_data$se)
+f43_plot_data$se_upper = exp(f43_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f43_plot_data$se_lower = exp(f43_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f43_plot_data$fit = exp((f43_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f43_gam_plot = ggplot(f43_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F43scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F43scaled),size=0.5, alpha=0.1, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 43 Z-score")+
+  ylab("Partial Effect of F43 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F43") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+
+ggsave("f43_gam_plot.svg", f43_gam_plot, width =4, height=3)
+
+#################################################
+#################################################
+```
+
+#F54 plot
+```{r}
+
+f54_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 53, ylim=c(500, 1200)) 
+
+f54_plot_data = list(f54_data[[54]]$x, f54_data[[54]]$se, f54_data[[54]]$fit)
+f54_plot_data = as.data.frame(f54_plot_data)
+colnames(f54_plot_data) = c("x", "se", "fit")
+f54_plot_data$se_upper = f54_plot_data$fit + (f54_plot_data$se)
+f54_plot_data$se_lower = f54_plot_data$fit - (f54_plot_data$se)
+f54_plot_data$se_upper = exp(f54_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f54_plot_data$se_lower = exp(f54_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f54_plot_data$fit = exp((f54_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f54_gam_plot = ggplot(f54_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F54scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F54scaled),size=0.5, alpha=0.1, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 54 Z-score")+
+  ylab("Partial Effect of F54 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F54") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f54_gam_plot.svg", f54_gam_plot, width =4, height=3)
+
+
+f54_main_plot = ggplot(f54_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F54scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F54scaled),size=0.5, alpha=0.1, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 54 (Z-score normalized)")+
+  ylab("Partial Effect of F54 on\nSurvival Time (Days)") +
+  ggtitle("Multivariable relationship of survival time vs. F54") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f54_main_plot.svg", f54_main_plot, width =6, height=3.5)
+
+
+
+#################################################
+#################################################
+```
+#F13 plot
+```{r}
+
+f13_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 13, ylim=c(500, 1200)) 
+
+f13_plot_data = list(f13_data[[13]]$x, f13_data[[13]]$se, f13_data[[13]]$fit)
+f13_plot_data = as.data.frame(f13_plot_data)
+colnames(f13_plot_data) = c("x", "se", "fit")
+f13_plot_data$se_upper = f13_plot_data$fit + (f13_plot_data$se)
+f13_plot_data$se_lower = f13_plot_data$fit - (f13_plot_data$se)
+f13_plot_data$se_upper = exp(f13_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f13_plot_data$se_lower = exp(f13_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f13_plot_data$fit = exp((f13_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f13_gam_plot = ggplot(f13_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F13scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F13scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 13 (Z-score normalized)")+
+  ylab("Partial Effect of F13 on\nSurvival Time (Days)") +
+  ggtitle("Multivariable relationship of survival time vs. F13") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f13_gam_plot.svg", f13_gam_plot, width =6, height=4)
+
+
+
+
+f13_gam_supp = ggplot(f13_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F13scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F13scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 13 Z-score")+
+  ylab("Partial Effect of F13 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F13") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f13_gam_supp.svg", f13_gam_supp, width =4, height=3)
+
+#################################################
+#################################################
+```
+#F20 plot
+```{r}
+
+f20_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 20, ylim=c(500, 1200)) 
+
+f20_plot_data = list(f20_data[[20]]$x, f20_data[[20]]$se, f20_data[[20]]$fit)
+f20_plot_data = as.data.frame(f20_plot_data)
+colnames(f20_plot_data) = c("x", "se", "fit")
+f20_plot_data$se_upper = f20_plot_data$fit + (f20_plot_data$se)
+f20_plot_data$se_lower = f20_plot_data$fit - (f20_plot_data$se)
+f20_plot_data$se_upper = exp(f20_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f20_plot_data$se_lower = exp(f20_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f20_plot_data$fit = exp((f20_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f20_gam_plot = ggplot(f20_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F20scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F20scaled),size=0.5, alpha=0.1, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 20 Z-score")+
+  ylab("Partial Effect of F20 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F20") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f20_gam_plot.svg", f20_gam_plot, width =4, height=3)
+
+#################################################
+#################################################
+```
+#F21 plot
+```{r}
+
+f21_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 21, ylim=c(500, 1200)) 
+
+f21_plot_data = list(f21_data[[21]]$x, f21_data[[21]]$se, f21_data[[21]]$fit)
+f21_plot_data = as.data.frame(f21_plot_data)
+colnames(f21_plot_data) = c("x", "se", "fit")
+f21_plot_data$se_upper = f21_plot_data$fit + (f21_plot_data$se)
+f21_plot_data$se_lower = f21_plot_data$fit - (f21_plot_data$se)
+f21_plot_data$se_upper = exp(f21_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f21_plot_data$se_lower = exp(f21_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f21_plot_data$fit = exp((f21_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f21_gam_plot = ggplot(f21_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F21scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  ylim(600,4250) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F21scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 21 Z-score")+
+  ylab("Partial Effect of F21 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F21") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f21_gam_plot .svg", f21_gam_plot, width =4, height=3)
+
+```
+#F22 plot
+```{r}
+
+f22_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 22, ylim=c(500, 1200)) 
+
+f22_plot_data = list(f22_data[[22]]$x, f22_data[[22]]$se, f22_data[[22]]$fit)
+f22_plot_data = as.data.frame(f22_plot_data)
+colnames(f22_plot_data) = c("x", "se", "fit")
+f22_plot_data$se_upper = f22_plot_data$fit + (f22_plot_data$se)
+f22_plot_data$se_lower = f22_plot_data$fit - (f22_plot_data$se)
+f22_plot_data$se_upper = exp(f22_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f22_plot_data$se_lower = exp(f22_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f22_plot_data$fit = exp((f22_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f22_gam_plot = ggplot(f22_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F22scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F22scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 22 Z-score")+
+  ylab("Partial Effect of F22 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F22") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f22_gam_plot.svg", f22_gam_plot, width =4, height=3)
+
+
+
+```
+#F23 plot
+```{r}
+
+f23_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 23, ylim=c(500, 1200)) 
+
+f23_plot_data = list(f23_data[[23]]$x, f23_data[[23]]$se, f23_data[[23]]$fit)
+f23_plot_data = as.data.frame(f23_plot_data)
+colnames(f23_plot_data) = c("x", "se", "fit")
+f23_plot_data$se_upper = f23_plot_data$fit + (f23_plot_data$se)
+f23_plot_data$se_lower = f23_plot_data$fit - (f23_plot_data$se)
+f23_plot_data$se_upper = exp(f23_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f23_plot_data$se_lower = exp(f23_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f23_plot_data$fit = exp((f23_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f23_gam_plot = ggplot(f23_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F23scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F23scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 23 Z-score")+
+  ylab("Partial Effect of F23 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F23") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f23_gam_plot .svg", f23_gam_plot, width =4, height=3)
+
+
+
+```
+#F36 plot
+```{r}
+
+f36_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 36, ylim=c(500, 1200)) 
+
+f36_plot_data = list(f36_data[[36]]$x, f36_data[[36]]$se, f36_data[[36]]$fit)
+f36_plot_data = as.data.frame(f36_plot_data)
+colnames(f36_plot_data) = c("x", "se", "fit")
+f36_plot_data$se_upper = f36_plot_data$fit + (f36_plot_data$se)
+f36_plot_data$se_lower = f36_plot_data$fit - (f36_plot_data$se)
+f36_plot_data$se_upper = exp(f36_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f36_plot_data$se_lower = exp(f36_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f36_plot_data$fit = exp((f36_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f36_gam_plot = ggplot(f36_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F36scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  ylim(850,1825) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F36scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 36 Z-score")+
+  ylab("Partial Effect of F36 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F36") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f36_gam_plot .svg", f36_gam_plot, width =4, height=3)
+
+
+
+```
+
+#F49 plot
+```{r}
+
+f49_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 21, ylim=c(500, 1200)) 
+
+f49_plot_data = list(f49_data[[49]]$x, f49_data[[49]]$se, f49_data[[49]]$fit)
+f49_plot_data = as.data.frame(f49_plot_data)
+colnames(f49_plot_data) = c("x", "se", "fit")
+f49_plot_data$se_upper = f49_plot_data$fit + (f49_plot_data$se)
+f49_plot_data$se_lower = f49_plot_data$fit - (f49_plot_data$se)
+f49_plot_data$se_upper = exp(f49_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f49_plot_data$se_lower = exp(f49_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f49_plot_data$fit = exp((f49_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f49_gam_plot = ggplot(f49_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F49scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  ylim(925,1400) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F49scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 49 Z-score")+
+  ylab("Partial Effect of F49 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F49") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f49_gam_plot.svg", f49_gam_plot, width =4, height=3)
+
+
+
+```
+#F56 plot
+```{r}
+
+f56_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 56, ylim=c(500, 1200)) 
+
+f56_plot_data = list(f56_data[[56]]$x, f56_data[[56]]$se, f56_data[[56]]$fit)
+f56_plot_data = as.data.frame(f56_plot_data)
+colnames(f56_plot_data) = c("x", "se", "fit")
+f56_plot_data$se_upper = f56_plot_data$fit + (f56_plot_data$se)
+f56_plot_data$se_lower = f56_plot_data$fit - (f56_plot_data$se)
+f56_plot_data$se_upper = exp(f56_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f56_plot_data$se_lower = exp(f56_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f56_plot_data$fit = exp((f56_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f56_gam_plot = ggplot(f56_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F56scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F56scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 56 Z-score")+
+  ylab("Partial Effect of F56 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F56") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f56_gam_plot.svg", f56_gam_plot, width =4, height=3)
+
+
+
+```
+#F60 plot
+```{r}
+
+f60_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 60, ylim=c(500, 1200)) 
+
+f60_plot_data = list(f60_data[[60]]$x, f60_data[[60]]$se, f60_data[[60]]$fit)
+f60_plot_data = as.data.frame(f60_plot_data)
+colnames(f60_plot_data) = c("x", "se", "fit")
+f60_plot_data$se_upper = f60_plot_data$fit + (f60_plot_data$se)
+f60_plot_data$se_lower = f60_plot_data$fit - (f60_plot_data$se)
+f60_plot_data$se_upper = exp(f60_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f60_plot_data$se_lower = exp(f60_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f60_plot_data$fit = exp((f60_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f60_gam_plot = ggplot(f60_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F60scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  ylim(750,2250) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F60scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 60 Z-score")+
+  ylab("Partial Effect of F60 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F60") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f60_gam_plot.svg", f60_gam_plot, width =4, height=3)
+
+
+
+```
+#F76 plot
+```{r}
+
+f76_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 76, ylim=c(500, 1200)) 
+
+f76_plot_data = list(f76_data[[76]]$x, f76_data[[76]]$se, f76_data[[76]]$fit)
+f76_plot_data = as.data.frame(f76_plot_data)
+colnames(f76_plot_data) = c("x", "se", "fit")
+f76_plot_data$se_upper = f76_plot_data$fit + (f76_plot_data$se)
+f76_plot_data$se_lower = f76_plot_data$fit - (f76_plot_data$se)
+f76_plot_data$se_upper = exp(f76_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f76_plot_data$se_lower = exp(f76_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f76_plot_data$fit = exp((f76_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f76_gam_plot = ggplot(f76_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F76scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F76scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 76 Z-score")+
+  ylab("Partial Effect of F76 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F76") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f76_gam_plot .svg", f76_gam_plot, width =4, height=3)
+
+
+
+```
+#F84 plot
+```{r}
+
+f84_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 84, ylim=c(500, 1200)) 
+
+f84_plot_data = list(f84_data[[84]]$x, f84_data[[84]]$se, f84_data[[84]]$fit)
+f84_plot_data = as.data.frame(f84_plot_data)
+colnames(f84_plot_data) = c("x", "se", "fit")
+f84_plot_data$se_upper = f84_plot_data$fit + (f84_plot_data$se)
+f84_plot_data$se_lower = f84_plot_data$fit - (f84_plot_data$se)
+f84_plot_data$se_upper = exp(f84_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f84_plot_data$se_lower = exp(f84_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f84_plot_data$fit = exp((f84_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f84_gam_plot = ggplot(f84_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F84scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F84scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 84 Z-score")+
+  ylab("Partial Effect of F84 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F84") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f84_gam_plot .svg", f84_gam_plot, width =4, height=3)
+
+
+```
+#F90 plot
+```{r}
+
+f90_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 90, ylim=c(500, 1200)) 
+
+f90_plot_data = list(f90_data[[90]]$x, f90_data[[90]]$se, f90_data[[90]]$fit)
+f90_plot_data = as.data.frame(f90_plot_data)
+colnames(f90_plot_data) = c("x", "se", "fit")
+f90_plot_data$se_upper = f90_plot_data$fit + (f90_plot_data$se)
+f90_plot_data$se_lower = f90_plot_data$fit - (f90_plot_data$se)
+f90_plot_data$se_upper = exp(f90_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f90_plot_data$se_lower = exp(f90_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f90_plot_data$fit = exp((f90_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f90_gam_plot = ggplot(f90_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F90scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  ylim(875,1425) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F90scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 90 Z-score")+
+  ylab("Partial Effect of F90 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F90") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f90_gam_plot.svg", f90_gam_plot, width =4, height=3)
+
+
+
+```
+#F96 plot
+```{r}
+
+f96_data=plot(mod_bam2_nb, residuals = FALSE, pch=1, cex=1, seWithMean = FALSE,
+     shift = (coef(mod_bam2_nb)[1]), trans=exp,select = 96, ylim=c(500, 1200)) 
+
+f96_plot_data = list(f96_data[[96]]$x, f96_data[[96]]$se, f96_data[[96]]$fit)
+f96_plot_data = as.data.frame(f96_plot_data)
+colnames(f96_plot_data) = c("x", "se", "fit")
+f96_plot_data$se_upper = f96_plot_data$fit + (f96_plot_data$se)
+f96_plot_data$se_lower = f96_plot_data$fit - (f96_plot_data$se)
+f96_plot_data$se_upper = exp(f96_plot_data$se_upper + ((coef(mod_bam2_nb)[1])))
+f96_plot_data$se_lower = exp(f96_plot_data$se_lower + ((coef(mod_bam2_nb)[1])))
+f96_plot_data$fit = exp((f96_plot_data$fit)+ ((coef(mod_bam2_nb)[1])))
+
+f96_gam_plot = ggplot(f96_plot_data, aes(x = x, y=fit)) + 
+  geom_hline(yintercept = 1015.448, linetype=2, alpha=0.5, size=0.75) +
+  geom_vline(xintercept = quantile(survival_combo$F96scaled, probs = 0.90), linetype=2, alpha=0.5, size=0.75) +
+  geom_ribbon( aes(ymin=se_upper, ymax=se_lower), colour="#6BAED6", alpha=0.5, size=0, fill="#6BAED6",linetype=2) + geom_point(size=0) +
+  geom_line(colour="black", size=1.25) +
+  geom_rug(inherit.aes = FALSE, data=survival_combo, aes(x=F96scaled),size=0.5, alpha=0.25, colour ="#41AB5D",length = unit(0.075, "npc") ) +
+xlab("Factor 96 Z-score")+
+  ylab("Partial Effect of F96 on\nSurvival Time (Days)") +
+  ggtitle("Survival time vs. F96") +
+  theme_bw()+
+    theme(axis.text.x = element_text(colour="black", size = 16)) +
+    theme(axis.text.y = element_text(colour="black",size = 16)) + 
+    theme(plot.title = element_text(colour="black", size=16,hjust = 0, vjust=0)) +
+    theme(axis.title.x = element_text(colour="black",size = 16)) +
+    theme(axis.title.y = element_text(colour="black", size=16)) +
+    theme(legend.position = c(0.6, 0.3),
+          legend.title = element_text(colour="black", size = 16),
+          legend.text = element_text(colour="black", size = 16)) 
+ggsave("f96_gam_plot.svg", f96_gam_plot, width =4, height=3)
+```
+#Spearman correlations univariate statistical test 
+```{r}
+mltr_survival_corr = survival_combo
+
+#Survival time
+cor_list <- by(survival_combo[,c(126:225,125)], survival_combo[,107], function(x) cor(x,use="pairwise.complete.obs", method="spearman"))
+
+
+cor_list = lapply(cor_list, function(x) x[(colnames(x) %in% c("survival_time"))])
+cor_list <- data.frame(ID = rep(names(cor_list), sapply(cor_list, length)),
+                 Obs = unlist(cor_list))
+cor_list$Factor = rep(c(paste("F", 1:100, sep="") , "survival_time"),20)
+
+cor_list_wide = tidyr::spread(cor_list, Factor, Obs)
+cor_list_wide = tibble::column_to_rownames(cor_list_wide,  "ID")
+cor_list_wide = dplyr::select(cor_list_wide, -"survival_time")
+```
+#Heatmap with gam terms
+```{r}
+trim_gam = cor_list_wide
+trim_gam = as.data.frame(trim_gam)
+trim_cor_list_gam = dplyr::select(trim_gam, all_of(nonlinear_factors))
+trim_cor_list_gam_wide = as.matrix(t(trim_cor_list_gam))
+
+cols_survival = (brewer.pal(9, "RdBu"))
+paletteLength = 1000
+myBreaks_survival <- c(seq(min(trim_cor_list_gam_wide), 0, length.out=ceiling(paletteLength/2) + 1), 
+              seq(max(trim_cor_list_gam_wide)/paletteLength, max(trim_cor_list_gam_wide), length.out=floor(paletteLength/2)))
+
+
+make_bold_names <- function(mat, rc_fun, rc_names) {
+  bold_names <- rc_fun(mat)
+  ids <- rc_names %>% match(rc_fun(mat))
+  ids %>%
+    purrr::walk(
+      function(i)
+        bold_names[i] <<-
+        bquote(bold(.(rc_fun(mat)[i]))) %>%
+        as.expression()
+    )
+  bold_names
+}
+
+
+gam_survival = pheatmap(trim_cor_list_gam_wide,method = 'complete', 
+                          color = colorRampPalette(cols_survival)(1000), 
+                          cellwidth = 12 , 
+                          cellheight = 12, 
+                          angle_col = 90, 
+                          labels_row = make_bold_names(trim_cor_list_gam_wide,
+                                  rc_fun = row.names,
+                                  c("F96", "F92", "F22", "F56", "F23", "F43", "F13", "F84")), 
+                          breaks=myBreaks_survival, 
+                          legend_breaks = c(-0.3, -0.2,-0.1,0,0.1,0.2), 
+                          treeheight_row = 25, 
+                          treeheight_col = 25)
+
+
+gam_survival$gtable$grobs[[5]]$gp=gpar(col=c("#2171B5","#2171B5","#2171B5","#2171B5","#2171B5","#2171B5","#CB181D","#2171B5","#2171B5","#CB181D","#CB181D","#CB181D", "#CB181D", "#CB181D", "#CB181D", "#CB181D"))
+gam_survival
+
+
+svg(filename="gam_survival.svg", width=6, height=4.5)
+gam_survival
+dev.off()
+
+
+png(filename="gam_survival.png", width=7, height=5, units = 'in', res = 300)
+gam_survival
+dev.off()
+
+```
+
+
+#Quantile plot
+```{r}
+###quantile analysis 
+#first check the z score value of the 90% for each factor. Evidently there some factors which are expressed in many cancer and others enriched only in one or two cancers.
+
+quantile_analysis = survival_combo %>%
+  group_by(Type) %>%
+   summarise_at(vars(F1scaled:F100scaled), .funs = function(x) quantile(x, probs = 0.9, na.rm = TRUE))
+
+quantile_analysis  = tibble::column_to_rownames(quantile_analysis, "Type")
+colnames(quantile_analysis) = gsub('.{6}$', '', colnames(quantile_analysis))
+
+quantile_analysis  %>%
+  dplyr::select(.,all_of(nonlinear_factors))
+
+quantile_ninety = log10(quantile_analysis +1)  %>%
+  dplyr::select(.,all_of(nonlinear_factors))
+
+cols_quantile = (brewer.pal(9, "PuOr"))
+
+cols_quantile = c("#2171B5", "#6BAED6", "#BDD7E7","#FFFFFF", "#74C476", "#238B45", "#00441B" ) #custom blue green divergent 
+paletteLength = 1000
+myBreaks_quantile <- c(seq(min(quantile_ninety), 0, length.out=ceiling(paletteLength/2) + 1), 
+              seq(max(quantile_ninety)/paletteLength, max(quantile_ninety), length.out=floor(paletteLength/2)))
+
+
+
+set.seed(99)
+quantile_plot = pheatmap(quantile_ninety,method = 'complete', breaks = myBreaks_quantile,color= colorRampPalette((cols_quantile))(1000),
+         cellwidth = 17 , 
+         fontsize = 14,
+         labels_col = make_bold_names(quantile_ninety, rc_fun = colnames,c("F96", "F92", "F22","F56", "F23", "F43", "F13", "F84")),
+         cellheight = 17, 
+                          angle_col = 45,
+         treeheight_row = 25, 
+                          treeheight_col = 25)
+
+
+quantile_plot$gtable$grobs[[4]]$gp=gpar(col=c("#CB181D", "#CB181D", "#CB181D","#2171B5","#CB181D","#2171B5","#CB181D","#CB181D","#2171B5","#2171B5","#CB181D","#2171B5","#2171B5","#2171B5","#2171B5","#CB181D"))
+quantile_plot
+
+
+svg("quantile_plot.svg", width=10, height=16 )
+quantile_plot
+dev.off()
+
+png("quantile_plot.png", width=10, height=16 , units = 'in', res = 300) 
+quantile_plot
+dev.off()
+
+```
+
+
+
+#GSEA analysis 
+```{r}
+library(clusterProfiler)
+library(msigdbr)
+library(AnnotationDbi)
+library(ggupset)
+library(ggnewscale)
+library(DOSE)
+library(ggridges)
+```
+
+###Import top_genes data from LIMMA analysis
+```{r}
+load("/Users/danielskubleny/Documents/R projects/Topics/NMF/VAE characterization/top_genes_subset.RData")
+top_genes = top_genes_subset
+```
+###Enricher for top multivariable factors 
+#Factor 13
+```{r}
+geneList <- top_genes[["F13"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F13"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F13"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V2")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+em13 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 20
+```{r}
+geneList <- top_genes[["F20"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F20"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F20"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V1")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, human_gene_symbol)
+em20 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 21
+```{r}
+geneList <- top_genes[["F21"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F21"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F21"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V2")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+em21 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 22
+```{r}
+geneList <- top_genes[["F22"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F22"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F22"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V2")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+em22 <- GSEA(gene_List, TERM2GENE = m_t2g, eps=0)
+```
+#Factor 23
+```{r}
+geneList <- top_genes[["F23"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F23"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F23"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V1")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, human_gene_symbol)
+em23 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 36
+```{r}
+geneList <- top_genes[["F36"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F36"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F36"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V1")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, human_gene_symbol)
+em36 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 43
+```{r}
+geneList <- top_genes[["F43"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F43"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F43"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V2")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+em43 <- GSEA(gene_List, TERM2GENE = m_t2g, eps = 0, nPermSimple = 10000)
+```
+#Factor 49
+```{r}
+geneList <- top_genes[["F49"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F49"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F49"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V2")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+em49 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 54
+```{r}
+geneList <- top_genes[["F54"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F54"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F54"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V1")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, human_gene_symbol)
+em54 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 56
+```{r}
+geneList <- top_genes[["F56"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F56"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F56"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V1")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, human_gene_symbol)
+em56 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 60
+```{r}
+geneList <- top_genes[["F60"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F60"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F60"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V1")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, human_gene_symbol)
+em60 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 76
+```{r}
+geneList <- top_genes[["F76"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F76"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F76"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V1")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, human_gene_symbol)
+em76 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 84
+```{r}
+geneList <- top_genes[["F84"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F84"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F84"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V2")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+em84 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 90
+```{r}
+geneList <- top_genes[["F90"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F90"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F90"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V1")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, human_gene_symbol)
+em90 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 92
+```{r}
+geneList <- top_genes[["F92"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F92"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F92"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V2")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+em92 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+#Factor 96
+```{r}
+geneList <- top_genes[["F96"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F96"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F96"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V2")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+em96 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+
+
+
+#Compile enrichment 
+```{r}
+hallmarks = as.data.frame(unique(m_t2g$gs_name))
+enricher1 = dplyr::select(em92@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher1 = merge(hallmarks,enricher1, by.x= "ID", all=TRUE)
+enricher1 = tibble::column_to_rownames(enricher1, "ID")
+enricher1 = as.data.frame(t(enricher1))
+enricher1$cluster = "F92"
+enricher1= enricher1[,sort(names(enricher1))]
+
+enricher2 = dplyr::select(em96@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher2 = merge(hallmarks,enricher2, by.x= "ID", all=TRUE)
+enricher2 = tibble::column_to_rownames(enricher2, "ID")
+enricher2 = as.data.frame(t(enricher2))
+enricher2$cluster = "F96"
+enricher2= enricher2[,sort(names(enricher2))]
+
+enricher3 = dplyr::select(em22@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher3 = merge(hallmarks,enricher3, by.x= "ID", all=TRUE)
+enricher3 = tibble::column_to_rownames(enricher3, "ID")
+enricher3 = as.data.frame(t(enricher3))
+enricher3$cluster = "F22"
+enricher3= enricher3[,sort(names(enricher3))]
+
+enricher4 = dplyr::select(em56@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher4 = merge(hallmarks,enricher4, by.x= "ID", all=TRUE)
+enricher4 = tibble::column_to_rownames(enricher4, "ID")
+enricher4 = as.data.frame(t(enricher4))
+enricher4$cluster = "F56"
+enricher4= enricher4[,sort(names(enricher4))]
+
+enricher5 = dplyr::select(em13@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher5 = merge(hallmarks,enricher5, by.x= "ID", all=TRUE)
+enricher5 = tibble::column_to_rownames(enricher5, "ID")
+enricher5 = as.data.frame(t(enricher5))
+enricher5$cluster = "F13"
+enricher5= enricher5[,sort(names(enricher5))]
+
+enricher6 = dplyr::select(em23@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher6 = merge(hallmarks,enricher6, by.x= "ID", all=TRUE)
+enricher6 = tibble::column_to_rownames(enricher6, "ID")
+enricher6 = as.data.frame(t(enricher6))
+enricher6$cluster = "F23"
+enricher6= enricher6[,sort(names(enricher6))]
+
+enricher7 = dplyr::select(em43@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher7 = merge(hallmarks,enricher7, by.x= "ID", all=TRUE)
+enricher7 = tibble::column_to_rownames(enricher7, "ID")
+enricher7 = as.data.frame(t(enricher7))
+enricher7$cluster = "F43"
+enricher7= enricher7[,sort(names(enricher7))]
+
+enricher8 = dplyr::select(em21@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher8 = merge(hallmarks,enricher8, by.x= "ID", all=TRUE)
+enricher8 = tibble::column_to_rownames(enricher8, "ID")
+enricher8 = as.data.frame(t(enricher8))
+enricher8$cluster = "F21"
+enricher8= enricher8[,sort(names(enricher8))]
+
+enricher9 = dplyr::select(em76@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher9 = merge(hallmarks,enricher9, by.x= "ID", all=TRUE)
+enricher9 = tibble::column_to_rownames(enricher9, "ID")
+enricher9 = as.data.frame(t(enricher9))
+enricher9$cluster = "F76"
+enricher9= enricher9[,sort(names(enricher9))]
+
+enricher10 = dplyr::select(em20@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher10 = merge(hallmarks,enricher10, by.x= "ID", all=TRUE)
+enricher10 = tibble::column_to_rownames(enricher10, "ID")
+enricher10 = as.data.frame(t(enricher10))
+enricher10$cluster = "F20"
+enricher10= enricher10[,sort(names(enricher10))]
+
+enricher11 = dplyr::select(em49@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher11 = merge(hallmarks,enricher11, by.x= "ID", all=TRUE)
+enricher11 = tibble::column_to_rownames(enricher11, "ID")
+enricher11 = as.data.frame(t(enricher11))
+enricher11$cluster = "F49"
+enricher11= enricher11[,sort(names(enricher11))]
+
+enricher12 = dplyr::select(em84@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher12 = merge(hallmarks,enricher12, by.x= "ID", all=TRUE)
+enricher12 = tibble::column_to_rownames(enricher12, "ID")
+enricher12 = as.data.frame(t(enricher12))
+enricher12$cluster = "F84"
+enricher12= enricher12[,sort(names(enricher12))]
+
+enricher13 = dplyr::select(em60@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher13 = merge(hallmarks,enricher13, by.x= "ID", all=TRUE)
+enricher13 = tibble::column_to_rownames(enricher13, "ID")
+enricher13 = as.data.frame(t(enricher13))
+enricher13$cluster = "F60"
+enricher13= enricher13[,sort(names(enricher13))]
+
+enricher14 = dplyr::select(em36@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher14 = merge(hallmarks,enricher14, by.x= "ID", all=TRUE)
+enricher14 = tibble::column_to_rownames(enricher14, "ID")
+enricher14 = as.data.frame(t(enricher14))
+enricher14$cluster = "F36"
+enricher14= enricher14[,sort(names(enricher14))]
+
+enricher15 = dplyr::select(em90@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher15 = merge(hallmarks,enricher15, by.x= "ID", all=TRUE)
+enricher15 = tibble::column_to_rownames(enricher15, "ID")
+enricher15 = as.data.frame(t(enricher15))
+enricher15$cluster = "F90"
+enricher15= enricher15[,sort(names(enricher15))]
+
+enricher16 = dplyr::select(em54@result, c("ID", "NES"))
+colnames(hallmarks)[which(names(hallmarks) == "unique(m_t2g$gs_name)")] <- "ID"
+enricher16 = merge(hallmarks,enricher16, by.x= "ID", all=TRUE)
+enricher16 = tibble::column_to_rownames(enricher16, "ID")
+enricher16 = as.data.frame(t(enricher16))
+enricher16$cluster = "F54"
+enricher16= enricher16[,sort(names(enricher16))]
+```
+```{r}
+
+enricher_complete = rbind(enricher1, enricher2)
+enricher_complete = rbind(enricher_complete, enricher3)
+enricher_complete = rbind(enricher_complete, enricher4)
+enricher_complete = rbind(enricher_complete, enricher5)
+enricher_complete = rbind(enricher_complete, enricher6)
+enricher_complete = rbind(enricher_complete, enricher7)
+enricher_complete = rbind(enricher_complete, enricher8)
+enricher_complete = rbind(enricher_complete, enricher9)
+enricher_complete = rbind(enricher_complete, enricher10)
+enricher_complete = rbind(enricher_complete, enricher11)
+enricher_complete = rbind(enricher_complete, enricher12)
+enricher_complete = rbind(enricher_complete, enricher13)
+enricher_complete = rbind(enricher_complete, enricher14)
+enricher_complete = rbind(enricher_complete, enricher15)
+enricher_complete = rbind(enricher_complete, enricher16)
+enricher_complete <- replace(enricher_complete,is.na(enricher_complete),0)
+row.names(enricher_complete) = NULL
+enricher_complete = tibble::column_to_rownames(enricher_complete, "cluster")
+enricher_complete = as.data.frame(t(enricher_complete))
+
+enricher_complete = tibble::rownames_to_column(enricher_complete, "hallmark")
+hallmark = substring(enricher_complete[,1],10,nchar(enricher_complete[,1]))
+hallmark = str_replace_all(hallmark, "[^[:alnum:]]", " ")
+enricher_complete$hallmark = hallmark
+enricher_complete = tibble::column_to_rownames(enricher_complete, "hallmark")
+
+#enricher_complete[enricher_complete == 0] <- NA
+#cols = rev(brewer.pal(4,"Greens"))
+#pal = colorRampPalette(cols)
+#giveNAs = which(is.na(as.matrix(dist(enricher_complete))),arr.ind=TRUE)
+#head(giveNAs)
+#tab = sort(table(c(giveNAs)),decreasing=TRUE)
+#checkNA = sapply(1:length(tab),function(i){
+#sum(is.na(as.matrix(dist(enricher_complete[-as.numeric(names(tab[1:i])),]))))})
+#rmv = names(tab)[1:min(which(checkNA==0))]
+#enricher_complete = enricher_complete[-as.numeric(rmv),]
+
+rownames(enricher_complete)[rownames(enricher_complete) == "REACTIVE OXYGEN SPECIES PATHWAY"] <- "ROS PATHWAY"
+rownames(enricher_complete)[rownames(enricher_complete) == "EPITHELIAL MESENCHYMAL TRANSITION"] <- "EMT"
+
+brewer.pal(9, "BrBG")
+
+display.brewer.pal(4, "Blues")
+rev(brewer.pal(4, "Blues"))
+
+display.brewer.pal(4, "Greens")
+brewer.pal(4, "Greens")
+
+
+cols = (brewer.pal(9, "PRGn"))
+
+paletteLength = 1000
+myBreaks_cols <- c(seq(min(enricher_complete), 0, length.out=ceiling(paletteLength/2) + 1), 
+              seq(max(enricher_complete)/paletteLength, max(enricher_complete), length.out=floor(paletteLength/2)))
+
+make_bold_names <- function(mat, rc_fun, rc_names) {
+  bold_names <- rc_fun(mat)
+  ids <- rc_names %>% match(rc_fun(mat))
+  ids %>%
+    purrr::walk(
+      function(i)
+        bold_names[i] <<-
+        bquote(bold(.(rc_fun(mat)[i]))) %>%
+        as.expression()
+    )
+  bold_names
+}
+library(grid)
+
+#Favourable vs unfavourable is the coefficient from the multivariable nb glm model because it gives an overall positive or negative effect as a single coefficient. 
+
+set.seed(99)
+enricher_factors= pheatmap(enricher_complete,
+          color = colorRampPalette(cols)(1000), 
+          breaks=myBreaks_cols,
+          fontsize=14,
+          labels_col = make_bold_names(enricher_complete,
+                                  rc_fun = colnames,
+                                  c("F96", "F92", "F22", "F56", "F23", "F43", "F13", "F84")), 
+          legend_labels = c("-3", "-2","-1", "NS", "1", "2", "3"),
+          legend_breaks = c(-3,-2,-1, 0, 1,2,3),
+          cellheight = 16, 
+          cellwidth=16, 
+          treeheight_row=20,
+          treeheight_col=20,
+          angle_col = 45,
+          na_col = "white")
+
+
+enricher_factors$gtable$grobs[[4]]$gp=gpar(col=c("#2171B5","#CB181D","#CB181D","#2171B5","#CB181D","#CB181D","#2171B5","#CB181D","#2171B5","#2171B5","#2171B5","#2171B5","#CB181D","#CB181D","#CB181D","#2171B5"))
+enricher_factors
+
+svg("enricher_factors_multi_vert_new_new.svg", width = 10, height = 15 )
+enricher_factors
+dev.off()
+
+png("enricher_factors_multi_vert_new.png", width = 10, height = 15, units = 'in', res = 300) 
+enricher_factors
+dev.off()
+
+```
+
+
+set.seed(99)
+enricher_factors= pheatmap(enricher_complete,
+          color = colorRampPalette(cols)(1000), 
+          breaks=myBreaks_cols,
+          fontsize=14,
+          labels_col = make_bold_names(enricher_complete,
+                                  rc_fun = colnames,
+                                  c("F96", "F92", "F22", "F56", "F23", "F43", "F13", "F84")), 
+          labels_row = make_bold_names(enricher_complete,
+                                  rc_fun = row.names,
+                                  c("TGF BETA SIGNALING", "MITOTIC SPINDLE", "G2M CHECKPOINT")), 
+          legend_labels = c("-3", "-2","-1", "NS", "1", "2", "3"),
+          legend_breaks = c(-3,-2,-1, 0, 1,2,3),
+          cellheight = 16, 
+          cellwidth=16, 
+          treeheight_row=20,
+          treeheight_col=20,
+          angle_col = 45,
+          na_col = "white")

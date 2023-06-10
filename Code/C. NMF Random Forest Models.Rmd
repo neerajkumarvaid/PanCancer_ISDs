@@ -1,0 +1,635 @@
+---
+title: "NMF Factor Random Forest Models"
+author: "Daniel Skubleny"
+date: '2023-01-07'
+output: html_document
+---
+
+#Import libraries
+```{r, warning= FALSE, message=FALSE}
+#Libraries
+library(readxl)
+library(ggplot2)
+library(devtools)
+library(Biobase)
+library(AnnotationDbi)
+library(BiocManager)
+library(plyr)
+library(dplyr)
+library(sva)
+library(snpStats)
+library(limma)
+library(edge)
+library(annotate)
+library(sqldf)
+library(stringr)
+library(randomForest)
+library(caret)
+library(preprocessCore)
+library(glmnet)
+library(klaR)
+library(gbm)
+library(org.Hs.eg.db)
+library(measures)
+library(GEOquery)
+library(remotes)
+library(naivebayes)
+library(mlr)
+library(mlr3filters)
+library(Metrics)
+library(MLmetrics)
+library(readr)
+library(pheatmap)
+library(survival)
+library(survminer)
+library(ggRandomForests)
+library(data.table)
+library(fmsb)
+library(RColorBrewer)
+library(Rmisc)
+library(FSA)
+library(openxlsx)
+library(maftools)
+library(MuMIn)
+library(ggVennDiagram)
+library(grid)
+library(ggeffects)
+library(gratia)
+```
+
+#Load survival data as survival_data
+```{r}
+survival_data <- read.csv("NMF_survival_data_final.csv", row.names=1)
+
+#Combine the dataframe to incorporate 100 NMF Factors 
+patient_data <- read.csv("nmf_coefficient_rank100_PanCancer_10274cases.csv")
+
+factors = patient_data
+factors = dplyr::select(factors, -"Sample_ID")
+#Survival combo with only the 7922 survival data patients
+survival_combo = merge(factors,survival_data, by.x="Patient_ID")
+```
+
+#Prop test for ACC>NIR analysis 
+```{r}
+propTest <- function(x){
+    res <- try(
+      binom.test(sum(diag(x)),
+                 sum(x),
+                 p = max(apply(x, 2, sum)/sum(x)),
+                 alternative = "greater"),
+      silent = TRUE)
+    res <- if(inherits(res, "try-error"))
+      c("null.value.probability of success" = NA, p.value = NA)
+    else
+      res <- unlist(res[c("null.value", "p.value")])
+    res
+}
+```
+
+
+#Model Immune subtypes
+####Survival Cases
+```{r}
+#Model NMF representation by immune subtypes. 
+immune_merge_survival = survival_combo[!is.na(survival_combo$Immune_Subtype),]
+
+#Make our test and train data
+x= data.matrix(immune_merge_survival[,2:101])
+y= immune_merge_survival$Immune_Subtype
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.NMF.immune_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5))
+```
+```{r}
+importance = varImp(rf.NMF.immune_survival)
+```
+```{r}
+immune_info = as.data.frame(table(immune_merge_survival$Immune_Subtype))
+sum(immune_info$Freq)
+length(immune_info$Var1)
+summary(immune_info$Freq)
+```
+```{r}
+immune_confmat = confusionMatrix(rf.NMF.immune_survival, norm="none")
+immune_proptest = propTest(immune_confmat$table)
+immune_proptest
+```
+#TCGA subtypes
+####Survival Cases
+```{r}
+#Model NMF representation by all TCGA subtypes subtypes. 
+subtypes_merge_survival = survival_combo[!is.na(survival_combo$TCGA_Subtype),]
+subtypes_merge_survival$TCGA_Subtype = factor(subtypes_merge_survival$TCGA_Subtype)
+
+#Make our test and train data
+x= data.matrix(subtypes_merge_survival[,2:101])
+y= subtypes_merge_survival$TCGA_Subtype
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.NMF.subtype_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5,savePredictions="all"))
+```
+```{r}
+importance = varImp(rf.NMF.subtype_survival)
+```
+```{r}
+subtypes_info = as.data.frame(table(subtypes_merge_survival$TCGA_Subtype))
+sum(subtypes_info$Freq)
+length(subtypes_info$Var1)
+summary(subtypes_info$Freq)
+```
+```{r}
+subtypes_confmat = confusionMatrix(rf.NMF.subtype_survival, norm="none")
+subtypes_proptest = propTest(subtypes_confmat$table)
+```
+
+###CHECK CODE BELOW
+#TME Score evaluation 
+####Survival Cases
+```{r}
+#Model NMF representation by aneuploidy score 
+TMEscore_merge_survival = survival_combo[!is.na(survival_combo$Tumour_Microenvironment_Score),]
+TMEscore_merge_survival$Tumour_Microenvironment_Score = factor(TMEscore_merge_survival$Tumour_Microenvironment_Score)
+
+#Make our test and train data
+x= data.matrix(TMEscore_merge_survival[,2:101])
+y= TMEscore_merge_survival$Tumour_Microenvironment_Score
+y = as.factor(y)
+#Relevel for that High TME score is coded as 1
+y <- relevel(y, "Low")
+```
+```{r}
+set.seed(99)
+rf.TME_all_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5))
+```
+```{r}
+importance = varImp(rf.TME_all_survival)
+```
+```{r}
+TME_info = as.data.frame(table(TMEscore_merge_survival$Tumour_Microenvironment_Score))
+sum(TME_info$Freq)
+length(TME_info$Var1)
+summary(TME_info$Freq)
+```
+```{r}
+TME_confmat = confusionMatrix(rf.TME_all_survival, norm="none")
+TME_proptest = propTest(TME_confmat$table)
+TME_proptest
+```
+
+
+#Organ merge
+####Survival
+```{r}
+#Model NMF representation by organ of origin. 
+organ_merge_survival = survival_combo[!is.na(survival_combo$Type),]
+organ_merge_survival$Type = factor(organ_merge_survival$Type)
+
+#Make our test and train data
+x= data.matrix(organ_merge_survival[,2:101])
+y= organ_merge_survival$Type
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.NMF.organ_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5))
+```
+```{r}
+importance.organ = varImp(rf.NMF.organ_survival)
+```
+```{r}
+organ_info = as.data.frame(table(organ_merge_survival$Type))
+sum(organ_info$Freq)
+length(organ_info$Var1)
+summary(organ_info$Freq)
+```
+```{r}
+organ_confmat = confusionMatrix(rf.NMF.organ_survival, norm="none")
+organ_proptest = propTest(organ_confmat$table)
+organ_confmat
+organ_proptest
+```
+
+#Model Pathologic stage, trimmed
+####Survival cases
+```{r}
+#Model NMF representation by Stage
+stage_survival = survival_combo[!is.na(survival_combo$Stage),]
+stage_survival$Stage = factor(stage_survival$Stage)
+
+#Make our test and train data
+x= data.matrix(stage_survival[,2:101])
+y= stage_survival$Stage
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.stage_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5))
+```
+```{r}
+importance = varImp(rf.stage_survival)
+```
+```{r}
+stage_info = as.data.frame(table(stage_survival$Stage))
+sum(stage_info$Freq)
+length(stage_info$Var1)
+summary(stage_info$Freq)
+```
+```{r}
+stage_confmat = confusionMatrix(rf.stage_survival, norm="none")
+stage_proptest = propTest(stage_confmat$table)
+stage_confmat
+stage_proptest
+```
+#Model Histologic grade
+####Survival cases
+```{r}
+#Model NMF representation by histologic grade
+grade_survival = survival_combo[!is.na(survival_combo$Grade),]
+grade_survival$Grade = factor(grade_survival$Grade)
+
+#Make our test and train data
+x= data.matrix(grade_survival[,2:101])
+y= grade_survival$Grade
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.grade_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5))
+```
+```{r}
+grade_info = as.data.frame(table(grade_survival$Grade))
+sum(grade_info$Freq)
+length(grade_info$Var1)
+summary(grade_info$Freq)
+```
+```{r}
+grade_confmat = confusionMatrix(rf.grade_survival, norm="none")
+grade_proptest = propTest(grade_confmat$table)
+grade_confmat
+grade_proptest
+```
+#Model sex
+####Survival cases
+```{r}
+#Model NMF representation by sex
+sex_survival = survival_combo[!is.na(survival_combo$Sex),]
+sex_survival$Sex = factor(sex_survival$Sex)
+
+#Make our test and train data
+x= data.matrix(sex_survival[,2:101])
+y= sex_survival$Sex
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.sex_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5))
+```
+```{r}
+sex_info = as.data.frame(table(sex_survival$Sex))
+sum(sex_info$Freq)
+length(sex_info$Var1)
+summary(sex_info$Freq)
+```
+```{r}
+sex_confmat = confusionMatrix(rf.sex_survival, norm="none")
+sex_proptest = propTest(sex_confmat$table)
+sex_confmat
+sex_proptest
+```
+#Model Age
+####Survival cases
+```{r}
+#Merge expression data and subtype allocation
+clinical_age_merge_survival = survival_combo
+#Split age into relevant factor ranges
+clinical_age_merge_survival$Age <- cut(clinical_age_merge_survival$Age, c(0,40,Inf), c("Age < 40","Age >40"))
+clinical_age_merge_survival = clinical_age_merge_survival[!is.na(clinical_age_merge_survival$Age),]
+
+```
+```{r}
+#Model NMF representation by immune subtypes. 
+
+#Make our test and train data
+x= data.matrix(clinical_age_merge_survival[,2:101])
+y= clinical_age_merge_survival$Age
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.age_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5))
+```
+```{r}
+age_info = as.data.frame(table(clinical_age_merge_survival$Age))
+sum(age_info$Freq)
+length(age_info$Var1)
+summary(age_info$Freq)
+```
+```{r}
+age_confmat = confusionMatrix(rf.age_survival, norm="none")
+age_proptest = propTest(age_confmat$table)
+age_confmat
+age_proptest
+```
+
+#Model reccurent event
+####Survival cases
+```{r}
+#Model NMF representation by recurrent event
+recurrence_survival = survival_combo[!is.na(survival_combo$Recurrence),]
+recurrence_survival$Recurrence = factor(recurrence_survival$Recurrence)
+
+#Make our test and train data
+x= data.matrix(recurrence_survival[,2:101])
+y= recurrence_survival$Recurrence
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.recurrent_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5))
+```
+```{r}
+recurrence_info = as.data.frame(table(recurrence_survival$Recurrence))
+sum(recurrence_info$Freq)
+length(recurrence_info$Var1)
+summary(recurrence_info$Freq)
+```
+```{r}
+recurrence_confmat = confusionMatrix(rf.recurrent_survival, norm="none")
+recurrence_proptest = propTest(recurrence_confmat$table)
+recurrence_confmat
+recurrence_proptest
+```
+
+#Model New tumour event
+####Survival cases
+```{r}
+#Model NMF representation by new tumour event
+nte_survival = survival_combo[!is.na(survival_combo$New_tumour_event),]
+nte_survival$New_tumour_event = factor(nte_survival$New_tumour_event)
+
+#Make our test and train data
+x= data.matrix(nte_survival[,2:101])
+y= nte_survival$New_tumour_event
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.nte_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5))
+```
+
+#Model race
+####Survival cases
+```{r}
+#Model NMF representation by immune subtypes. 
+race_survival = survival_combo[!is.na(survival_combo$Race),]
+race_survival$Race = factor(race_survival$Race)
+
+#Make our test and train data
+x= data.matrix(race_survival[,2:101])
+y= race_survival$Race
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.race_survival = caret::train(x,y,'rf', trControl=trainControl(method='cv',number=5))
+```
+```{r}
+race_info = as.data.frame(table(race_survival$Race))
+sum(race_info$Freq)
+length(race_info$Var1)
+summary(race_info$Freq)
+```
+```{r}
+race_confmat = confusionMatrix(rf.race_survival, norm="none")
+race_proptest = propTest(race_confmat$table)
+race_confmat
+race_proptest
+```
+
+#Tumour Mutational Burden
+####Survival cases
+```{r}
+#Model NMF representation by TMB 
+tmb_factors_survival = survival_combo
+tmb_factors_survival$tmb_cutoff <- cut(tmb_factors_survival$Tumour_Mutational_Burden, c(-Inf,28.0,142.0,Inf), c("Low", "Med", "High"))
+tmb_factors_survival = tmb_factors_survival[!is.na(tmb_factors_survival$tmb_cutoff),]
+
+#Make our test and train data
+x= data.matrix(tmb_factors_survival[,2:101])
+y= tmb_factors_survival$tmb_cutoff
+y = as.factor(y)
+```
+```{r}
+set.seed(99)
+rf.NMF.tmb_survival = caret::train(x,y,'rf',trControl=trainControl(method='cv',number=5))
+```
+```{r}
+tmb_info = as.data.frame(table(tmb_factors_survival$tmb_cutoff))
+sum(tmb_info$Freq)
+length(tmb_info$Var1)
+summary(tmb_info$Freq)
+```
+```{r}
+tmb_confmat = confusionMatrix(rf.NMF.tmb_survival, norm="none")
+tmb_proptest = propTest(tmb_confmat$table)
+tmb_confmat
+tmb_proptest
+```
+
+
+#Compile Data for survival
+```{r}
+organ.cv = rf.NMF.organ_survival[["resample"]]
+organ.cv = dplyr::select(organ.cv, c("Accuracy", "Kappa"))
+organ.cv$Model <- 'Organ of Origin'
+
+subtype.cv = rf.NMF.subtype_survival[["resample"]]
+subtype.cv = dplyr::select(subtype.cv, c("Accuracy", "Kappa"))
+subtype.cv$Model <- 'TCGA Subtype'
+
+stage.cv = rf.stage_survival[["resample"]]
+stage.cv = dplyr::select(stage.cv, c("Accuracy", "Kappa"))
+stage.cv$Model <- 'Stage'
+
+grade.cv = rf.grade_survival[["resample"]]
+grade.cv = dplyr::select(grade.cv, c("Accuracy", "Kappa"))
+grade.cv$Model <- 'Grade'
+
+age.cv = rf.age_survival[["resample"]]
+age.cv = dplyr::select(age.cv, c("Accuracy", "Kappa"))
+age.cv$Model <- 'Age'
+
+sex.cv = rf.sex_survival[["resample"]]
+sex.cv = dplyr::select(sex.cv, c("Accuracy", "Kappa"))
+sex.cv$Model <- 'Sex'
+
+immune.cv = rf.NMF.immune_survival[["resample"]]
+immune.cv = dplyr::select(immune.cv, c("Accuracy", "Kappa"))
+immune.cv$Model <- 'Immune Landscape'
+
+tme.cv = rf.TME_all_survival_withstad[["resample"]]
+tme.cv = dplyr::select(tme.cv, c("Accuracy", "Kappa"))
+tme.cv$Model <- 'Tumour Microenvironment Score'
+
+reccurence.cv = rf.recurrent_survival[["resample"]]
+reccurence.cv = dplyr::select(reccurence.cv, c("Accuracy", "Kappa"))
+reccurence.cv$Model <- 'Recurrence'
+
+race.cv = rf.race_survival[["resample"]]
+race.cv = dplyr::select(race.cv, c("Accuracy", "Kappa"))
+race.cv$Model <- 'Race'
+
+tmb.cv = rf.NMF.tmb_survival[["resample"]]
+tmb.cv = dplyr::select(tmb.cv, c("Accuracy", "Kappa"))
+tmb.cv$Model <- 'TMB'
+
+```
+```{r}
+#Tumour molecular characteristics
+tumour_model_data_survival = rbind(organ.cv, subtype.cv)
+tumour_model_data_survival = rbind(tumour_model_data_survival, immune.cv)
+tumour_model_data_survival = rbind(tumour_model_data_survival, tme.cv)
+tumour_model_data_survival = rbind(tumour_model_data_survival, tmb.cv)
+
+#Clinicopathologic characteristics
+patient_model_data_survival = rbind(age.cv,sex.cv) 
+patient_model_data_survival = rbind(patient_model_data_survival, race.cv)
+patient_model_data_survival = rbind(patient_model_data_survival, stage.cv)
+patient_model_data_survival = rbind(patient_model_data_survival, grade.cv)
+patient_model_data_survival = rbind(patient_model_data_survival, reccurence.cv)
+```
+
+
+```{r}
+#Plot
+library(Rmisc)
+#Tumour model
+tumour_model_data_survival$Model = as.factor(tumour_model_data_survival$Model)
+
+tumour_model_data_accuracy <- summarySE(tumour_model_data_survival, measurevar="Accuracy", groupvars="Model")
+tumour_model_data_kappa <- summarySE(tumour_model_data_survival, measurevar="Kappa", groupvars="Model")
+colnames(tumour_model_data_accuracy)[which(names(tumour_model_data_accuracy) == "Accuracy")] <- "Value"
+colnames(tumour_model_data_kappa)[which(names(tumour_model_data_kappa) == "Kappa")] <- "Value"
+
+tumour_model_data_accuracy$Metric = 'Accuracy' 
+tumour_model_data_kappa$Metric = 'Kappa' 
+
+tumour_model_metrics_survival = rbind(tumour_model_data_accuracy,tumour_model_data_kappa)
+tumour_model_metrics_survival$Metric = as.factor(tumour_model_metrics_survival$Metric)
+
+levels(tumour_model_metrics_survival[(tumour_model_metrics_survival$Model) == 'Tumour Microenvironment Score',]) <- 'TME Score'
+
+levels(tumour_model_metrics_survival$Model)[levels(tumour_model_metrics_survival$Model)=="Tumour Microenvironment Score"] <- "TME Score"
+
+#Patient model
+patient_model_data_survival$Model = as.factor(patient_model_data_survival$Model)
+
+patient_model_data_accuracy <- summarySE(patient_model_data_survival, measurevar="Accuracy", groupvars="Model")
+patient_model_data_kappa <- summarySE(patient_model_data_survival, measurevar="Kappa", groupvars="Model")
+colnames(patient_model_data_accuracy)[which(names(patient_model_data_accuracy) == "Accuracy")] <- "Value"
+colnames(patient_model_data_kappa)[which(names(patient_model_data_kappa) == "Kappa")] <- "Value"
+
+patient_model_data_accuracy$Metric = 'Accuracy' 
+patient_model_data_kappa$Metric = 'Kappa' 
+
+patient_model_metrics_survival = rbind(patient_model_data_accuracy,patient_model_data_kappa)
+patient_model_metrics_survival$Metric = as.factor(patient_model_metrics_survival$Metric)
+
+patient_model_metrics_survival$Model <- factor(patient_model_metrics_survival$Model,levels = c( "Age", "Race", "Recurrence", "Sex", "Grade", "Stage"))
+```
+
+
+#95% CI data =  might not need
+```{r}
+tumour_model_metrics_survival_conf = tumour_model_metrics_survival
+tumour_model_metrics_survival_conf$upper = tumour_model_metrics_survival_conf$Value + tumour_model_metrics_survival_conf$ci
+tumour_model_metrics_survival_conf$lower = tumour_model_metrics_survival_conf$Value - tumour_model_metrics_survival_conf$ci
+tumour_model_metrics_survival_conf
+patient_model_metrics_survival_conf = patient_model_metrics_survival
+patient_model_metrics_survival_conf$upper = patient_model_metrics_survival_conf$Value + patient_model_metrics_survival_conf$ci
+patient_model_metrics_survival_conf$lower = patient_model_metrics_survival_conf$Value - patient_model_metrics_survival_conf$ci
+patient_model_metrics_survival_conf
+
+```
+
+###FINAL SURVIVAL FACTOR MODEL PLOTS
+```{r}
+# Error bars represent 95% CI
+tumour_gg_survival = ggplot(tumour_model_metrics_survival, aes(x=reorder(Model,-Value), y=Value, fill=Metric)) + 
+    geom_bar(position=position_dodge(), stat="identity", colour= "black") +
+    geom_errorbar(aes(ymin=Value-ci, ymax=Value+ci),
+                  width=.4,                  
+                  position=position_dodge(.9)) + 
+  scale_fill_manual("Metric", values = c("Accuracy" = "skyblue3", "Kappa" = "seagreen3")) + 
+  scale_y_continuous(limit = c(0, 1)) +
+  ggtitle("Tumour Characteristics") + 
+  ylab("Value") +
+  theme_classic()  + 
+  theme(axis.text.x = element_text(colour="black", size = 15,angle = 45, hjust=1)) +
+  theme(axis.text.y = element_text(colour="black",size = 15)) + 
+  theme(plot.title = element_text(colour="black", size=15,hjust = 0)) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.title.y = element_text(colour="black", size=15)) +
+  theme(legend.position = "none" ) 
+
+
+ggsave("tumour_gg_survival_final_new.svg", tumour_gg_survival,width=4, height=5)
+
+ggsave("tumour_gg_survival_final_new.png", tumour_gg_survival, width=6, height=5)
+
+patient_gg_survival = ggplot(patient_model_metrics_survival, aes(x = factor(Model, level = c('Age', 'Race', 'Recurrence','Sex','Grade','Stage' )), y=Value, fill=Metric)) + 
+    geom_bar(position=position_dodge(), stat="identity", colour= "black") +
+    geom_errorbar(aes(ymin=Value-ci, ymax=Value+ci),
+                  width=.4,                  
+                  position=position_dodge(.9)) +
+  scale_fill_manual("Metric", values = c("Accuracy" = "skyblue3", "Kappa" = "seagreen3")) + 
+  scale_y_continuous(limit = c(0, 1)) +
+  ggtitle("Clinicopathologic Characteristics") +
+  ylab("Value") +
+  theme_classic()  + 
+  theme(axis.text.x = element_text(colour="black", size = 15,angle = 45, hjust=1)) +
+  theme(plot.title = element_text(colour="black", size=15,hjust = 0)) +
+  theme(axis.title.x = element_blank()) +
+  theme(axis.title.y = element_text(colour="black", size=15)) +
+  theme(legend.title = element_text(color = "black", size = 15),
+        legend.text = element_text(color = "black", size = 15), 
+        legend.position = c(0.8,0.87), 
+        legend.background = element_rect(size=0.5, linetype="solid", 
+                                  colour ="black"))
+
+ggsave("patient_gg_survival_final_new.svg", patient_gg_survival, width=4, height=5)
+
+ggsave("patient_gg_survival_new.png", patient_gg_survival, width=6, height=5)
+
+library(patchwork)
+
+combined_factor_plots = tumour_gg_survival + patient_gg_survival
+
+combined_factor_plots[[1]] = combined_factor_plots[[1]] + 
+                              theme(legend.position = "none" ) + 
+                              theme(panel.grid.major.y = element_line(colour = "gray", size = 0.5)) +
+                              theme(panel.grid.minor.y = element_line(colour = "gray", size = 0.25)) +
+                              theme(plot.margin = unit(c(0.2,5.5,5.5,25), "points"))    
+
+combined_factor_plots[[2]] = combined_factor_plots[[2]] + 
+                                  theme(axis.text.y = element_blank(),
+                                        axis.ticks.y = element_blank(),
+                                        axis.title.y = element_blank(),
+                                        axis.line.y = element_blank()) + 
+                                  theme(panel.grid.major.y = element_line(colour = "gray", size = 0.5)) +
+                                  theme(panel.grid.minor.y = element_line(colour = "gray", size = 0.25)) + 
+                                  theme(plot.margin = unit(c(0.2,5.5,5.5,5.5), "points"))   
+                                  
+combined_factor_plots = combined_factor_plots + theme(text=element_text(size=12)) + theme(panel.grid.major.y = element_line(colour = "gray", size = 0.5)) 
+
+
+
+ggsave("combined_factor_plots_new.png", combined_factor_plots, width=7, height=6)
+ggsave("combined_factor_plots_new.svg", combined_factor_plots, width=7, height=6)
+
+```

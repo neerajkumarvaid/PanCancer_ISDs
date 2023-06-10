@@ -1,0 +1,357 @@
+---
+title: "Compilation of data for downstream use"
+author: "Daniel Skubleny"
+date: '2023-01-05'
+output: html_document
+---
+
+
+#Import libraries
+```{r, warning= FALSE, message=FALSE}
+#Libraries
+library(readxl)
+library(ggplot2)
+library(devtools)
+library(Biobase)
+library(AnnotationDbi)
+library(BiocManager)
+library(plyr)
+library(dplyr)
+library(annotate)
+library(stringr)
+library(org.Hs.eg.db)
+library(GEOquery)
+library(readr)
+library(survival)
+library(survminer)
+library(data.table)
+library(RColorBrewer)
+library(Rmisc)
+library(FSA)
+library(openxlsx)
+library(maftools)
+library(TCGAbiolinks)
+```
+
+#Import and arrange data
+```{r}
+#Import data
+## Import Data
+
+immune_landscape <- read.csv("Immune Landscape of Cancer/1-s2.0-S1074761318301213-mmc2.xlsx")
+patient_data <- read.csv("nmf_coefficient_rank100_PanCancer_10274cases.csv")
+```
+```{r}
+#Clean and arrange data
+immune_df = dplyr::select(immune_landscape, c("TCGA Participant Barcode", "Immune Subtype", "TCGA Subtype", "Aneuploidy Score"))
+
+# Change column names 
+colnames(immune_df)[which(names(immune_df) == "TCGA Participant Barcode")] <- "Patient_ID"
+immune_df[,1:ncol(immune_df)] = lapply(1:ncol(immune_df),function(x) as.factor(immune_df[[x]]))
+immune_df = na_if(immune_df, 'NA')
+immune_df <- immune_df %>% filter("Immune Subtype" != 'NA') %>% droplevels()
+```
+
+#Load and prepare expression data 
+```{r}
+edata <- read.delim("EBPlusPlusAdjustPANCAN_IlluminaHiSeq_RNASeqV2.geneExp.tsv")
+
+sampleid <- read.csv("nmf_coefficient_rank100_PanCancer_10274cases.csv")
+```
+
+#GENE LEVEL DATA
+```{r}
+NMF_genes <- read.csv("nmf_basis_rank100_PanCancer.csv", row.names=1)
+```
+
+```{r}
+genenames = NMF_genes$Gene_Id
+edata = edata %>% tibble::column_to_rownames("gene_id") # Make the first column the row name
+edata <- subset(edata, rownames(edata) %in% as.matrix(genenames))
+
+#Visualize data = boxplot
+par(mfrow=c(1,2))
+boxplot(edata[,1:50], col=2, range=0)
+boxplot(log2(edata+1)[,1:50], col=2, range=0)
+#Visualize data = barplot
+par(mfrow=c(1,2))
+hist(edata[,1],col=2)
+hist(log2(edata[,1]+1),col=3)
+# Bland Altman Plots
+mm = edata[,1] - edata[,2]
+aa = edata[,1] + edata[,2]
+plot(aa,mm,col=2) 
+
+mm = log2(edata[,1]+1) - log2(edata[,2]+1)
+aa = log2(edata[,1]+1) + log2(edata[,2]+1)
+plot(aa,mm,col=2)
+par(mfrow=c(1,1))
+
+#These visualizations confirm that log2+1 transformation is acceptable.
+
+tedata = t(edata)
+tedata = as.data.frame(tedata)
+```
+```{r}
+#Select Sample ID and replace "-" with "."
+sampleid = dplyr::select(sampleid, c("Sample_ID","Patient_ID"))
+
+df = sampleid$Sample_ID = str_replace_all(sampleid$Sample_ID, c("-" = "."))
+tedata <- subset(tedata, rownames(tedata) %in% as.matrix(df))
+tedata = tedata %>% tibble::rownames_to_column("Sample_ID") # Make rownames the first column
+
+#Modify matrix orientation
+tedata = merge(sampleid,tedata, by.x="Sample_ID")
+tedata = dplyr::select(tedata, -"Sample_ID") # Remove Sample_ID columns
+```
+```{r}
+#Log2 transform expression data
+exprs_data = tedata
+exprs_data[,2:16336] = log2(exprs_data[,2:16336] +1)
+```
+
+#Clinical Data
+```{r}
+tcga_clinical <- read_excel("TCGA-CDR-SupplementalTableS1.xlsx")
+
+tcga_clinical = dplyr::select(tcga_clinical, c("bcr_patient_barcode","type","age_at_initial_pathologic_diagnosis","gender","race","ajcc_pathologic_tumor_stage","clinical_stage", "histological_grade","treatment_outcome_first_course", "new_tumor_event_type", "DFI"))
+
+colnames(tcga_clinical)[which(names(tcga_clinical) == "bcr_patient_barcode")] <- "Patient_ID"
+```
+
+#Load all data for TCGA studies included in the survival analysis. LAML has entirely different data and specific therapy techniques--- will exclude
+####BRCA
+```{r}
+query <- GDCquery(project = "TCGA-BRCA", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+brca.clinical.BCRtab.all <- GDCprepare(query)
+```
+#Breast Cancer data 
+```{r}
+brca.clinical.data = brca.clinical.BCRtab.all[["clinical_patient_brca"]]
+brca.clinical.data = brca.clinical.data[-c(1:2),]
+brca.clinical.data = dplyr::select(brca.clinical.data, c("bcr_patient_barcode","her2_ihc_score","pr_status_by_ihc", "er_status_by_ihc", "her2_fish_status"))
+colnames(brca.clinical.data)[which(names(brca.clinical.data) == "bcr_patient_barcode")] <- "Patient_ID"
+```
+#TME Score
+```{r}
+TMEscore <- read_excel("tmescore_withstad.xlsx", sheet = "S13", col_names = FALSE, col_types = c("text", "text", "text", "text", "numeric", "numeric", "numeric", "text"))
+```
+```{r}
+#Set column names 
+colnames(TMEscore) = NULL
+colnames(TMEscore) = TMEscore[2,]
+TMEscore = TMEscore[-c(1:2),]
+
+colnames(TMEscore)[which(names(TMEscore) == "ID")] <- "Patient_ID"
+```
+
+#Tumor mutational burden
+```{r}
+#Using TMB is a proxy for two potential mechanisms. One is the relationship of TMB to the efficacy of DNA repair mechanisms. Factors associated with higher TMB would be definicient in DNA repair mechanisms. The second is the relationship of TMB to immunotherapy response. FDA has approved pembrolizumab for TMB>10 according to a targeted assay. Here we are using WES data and apply the same cut-off value. 
+#Phenotype Data
+```
+
+```{r}
+laml.maf <- system.file("extdata", "tcga_laml.maf.gz", package = "maftools")
+laml <- read.maf(maf = laml.maf)
+
+tmb = tcgaCompare(maf=laml,logscale = TRUE)
+tmb_sample = tmb[["mutation_burden_perSample"]]
+```
+```{r}
+#Fix patient ID
+tmb_sample$Tumor_Sample_Barcode = as.character(tmb_sample$Tumor_Sample_Barcode)
+Patient_ID = substr(tmb_sample$Tumor_Sample_Barcode,1,nchar(tmb_sample$Tumor_Sample_Barcode)-16)
+tmb_sample$Patient_ID = Patient_ID
+tmb_sample$Patient_ID = as.factor(tmb_sample$Patient_ID)
+tmb_sample = dplyr::select(tmb_sample, -"Tumor_Sample_Barcode")
+tmb_sample$logtmb = log10(tmb_sample$total)
+```
+
+
+
+
+```{r}
+pheno_data = patient_data
+pheno_data = dplyr::select(pheno_data, "Patient_ID", "Sample_ID")
+pheno_data = merge(pheno_data,tcga_clinical, by.x="Patient_ID", all = TRUE)
+pheno_data = pheno_data[!is.na(pheno_data$Sample_ID),]
+pheno_data = merge(pheno_data,brca.clinical.data, by.x="Patient_ID", all = TRUE)
+pheno_data = pheno_data[!is.na(pheno_data$Sample_ID),]
+pheno_data = merge(pheno_data,immune_df, by.x="Patient_ID", all = TRUE)
+pheno_data = pheno_data[!is.na(pheno_data$Sample_ID),]
+tme.score = dplyr::select(TMEscore, c("Patient_ID","TMEscore_binary"))
+pheno_data = merge(pheno_data,tme.score, by.x="Patient_ID", all = TRUE)
+pheno_data = pheno_data[!is.na(pheno_data$Sample_ID),]
+mutation_burden = dplyr::select(tmb_sample, c("Patient_ID", "total"))
+#Aggregate duplicate TMB by mean
+mutation_burden %>% group_by(Patient_ID) %>% summarise_all(mean) %>% data.frame() -> mutation_burden
+pheno_data = merge(pheno_data,mutation_burden, by.x="Patient_ID", all = TRUE)
+pheno_data = pheno_data[!is.na(pheno_data$Sample_ID),]
+```
+```{r}
+#Make missing data NA, remove data with limited use.
+pheno_data = na_if(pheno_data, '[Unknown]')
+pheno_data = na_if(pheno_data, '[Not Available]')
+pheno_data = na_if(pheno_data, '[Not Available]|[Not Available]')
+pheno_data = na_if(pheno_data, '[Not Applicable]')
+pheno_data = na_if(pheno_data, '')
+pheno_data = na_if(pheno_data, '[Discrepancy]')
+pheno_data = na_if(pheno_data, '[Not Evaluated]')
+pheno_data = na_if(pheno_data, "Stage X")
+pheno_data = na_if(pheno_data, "I or II NOS")
+pheno_data = na_if(pheno_data, "Stage 0")
+pheno_data = na_if(pheno_data, "Stage IS")
+pheno_data = na_if(pheno_data, "IS")
+pheno_data = na_if(pheno_data, "I/II NOS")
+pheno_data = na_if(pheno_data, "NOS")
+
+#Make new variable stage. Prefer pathologic stage if present. If NA use clinical stage if present
+pheno_data = pheno_data %>% 
+  mutate(Stage = if_else(is.na(ajcc_pathologic_tumor_stage), clinical_stage,ajcc_pathologic_tumor_stage))
+
+#Code new_tumor_event_type as yes and no. Exclude new primary. 
+#Split histology into Lauren class and WHO class
+pheno_data$New_tumour_event <- ifelse(grepl("Distant", pheno_data$new_tumor_event_type, ignore.case = T), "Yes",
+                              ifelse(grepl("Locoregional", pheno_data$new_tumor_event_type, ignore.case = T), "Yes",
+                              ifelse(grepl("Recurrence", pheno_data$new_tumor_event_type, ignore.case = T), "Yes",
+                              ifelse(grepl("Progression", pheno_data$new_tumor_event_type, ignore.case = T), "Yes",
+                              ifelse(grepl("Metastatic", pheno_data$new_tumor_event_type, ignore.case = T), "Yes",
+                              ifelse(grepl("Regional", pheno_data$new_tumor_event_type, ignore.case = T),"Yes",
+                              ifelse(grepl("Biochemical", pheno_data$new_tumor_event_type, ignore.case = T), "Yes",
+                              ifelse(grepl("New primary", pheno_data$new_tumor_event_type, ignore.case = T), "Yes", "No"))))))))
+
+#Recurrence
+pheno_data$DFI <- ifelse(pheno_data$DFI == 1, "Yes", "No")
+
+#Pathologic Stage
+pheno_data <- pheno_data %>% filter("Stage" != '') %>% droplevels()
+pheno_data <- pheno_data %>% filter("Stage" != '[Discrepancy]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("Stage" != '[Unknown]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("Stage" != '[Not Available]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("Stage" != '[Discrepancy]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("Stage" != "Stage X") %>% droplevels()
+pheno_data <- pheno_data %>% filter("Stage" != "I or II NOS") %>% droplevels()
+pheno_data <- pheno_data %>% filter("Stage" != "Stage 0") %>% droplevels()
+pheno_data <- pheno_data %>% filter("Stage" != "Stage IS") %>% droplevels()
+
+#Convert strings
+pheno_data$Stage<- ifelse(grepl("IV", pheno_data$Stage, ignore.case = T), "Stage IV",
+                              ifelse(grepl("III", pheno_data$Stage, ignore.case = T), "Stage III",
+                              ifelse(grepl("II", pheno_data$Stage, ignore.case = T), "Stage II", 
+                              ifelse(grepl("I", pheno_data$Stage, ignore.case = T), "Stage I", "No Stage"))))
+pheno_data = na_if(pheno_data, 'No Stage')
+
+#Race
+pheno_data <- pheno_data %>% filter("race" != '[Unknown]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("race" != '[Not Available]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("race" != '[Not Evaluated]') %>% droplevels()
+
+#Grade
+pheno_data = na_if(pheno_data, "GB") 
+pheno_data = na_if(pheno_data, "High Grade") 
+pheno_data = na_if(pheno_data, "Low Grade") 
+pheno_data = na_if(pheno_data, "GX") 
+
+pheno_data <- pheno_data %>% filter("histological_grade" != '') %>% droplevels()
+pheno_data <- pheno_data %>% filter("histological_grade" != '[Discrepancy]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("histological_grade" != '[Unknown]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("histological_grade" != '[Not Available]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("histological_grade" != 'GB') %>% droplevels()
+pheno_data <- pheno_data %>% filter("histological_grade" != 'High Grade') %>% droplevels()
+pheno_data <- pheno_data %>% filter("histological_grade" != 'Low Grade') %>% droplevels()
+
+#Breast CA
+pheno_data <- pheno_data %>% filter("pr_status_by_ihc" != '[Not Evaluated]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("her2_ihc_score" != '[Not Available]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("er_status_by_ihc" != '[Not Evaluated]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("her2_fish_status" != '[Not Evaluated]') %>% droplevels()
+pheno_data <- pheno_data %>% filter("her2_fish_status" != '[Not Available]') %>% droplevels()
+```
+```{r}
+#Change column names 
+colnames(pheno_data)[which(names(pheno_data) == "type")] <- "Type"
+colnames(pheno_data)[which(names(pheno_data) == "gender")] <- "Sex"
+colnames(pheno_data)[which(names(pheno_data) == "race")] <- "Race"
+colnames(pheno_data)[which(names(pheno_data) == "age_at_initial_pathologic_diagnosis")] <- "Age"
+colnames(pheno_data)[which(names(pheno_data) == "histological_grade")] <- "Grade"
+colnames(pheno_data)[which(names(pheno_data) == "TMEscore_binary")] <- "Tumour_Microenvironment_Score"
+colnames(pheno_data)[which(names(pheno_data) == "total")] <- "Tumour_Mutational_Burden"
+colnames(pheno_data)[which(names(pheno_data) == "DFI")] <- "Recurrence"
+colnames(pheno_data)[which(names(pheno_data) == "TCGA Subtype")] <- "TCGA_Subtype"
+colnames(pheno_data)[which(names(pheno_data) == "Aneuploidy Score")] <- "Aneuploidy_Score"
+colnames(pheno_data)[which(names(pheno_data) == "Immune Subtype")] <- "Immune_Subtype"
+
+#Remove useless columns
+pheno_data = dplyr::select(pheno_data, -c("ajcc_pathologic_tumor_stage","clinical_stage","new_tumor_event_type"))
+```
+
+```{r}
+pheno_data$Stage = as.factor(pheno_data$Stage)
+pheno_data$Type = as.factor(pheno_data$Type)
+pheno_data$Sex = as.factor(pheno_data$Sex)
+pheno_data$Race = as.factor(pheno_data$Race)
+pheno_data$Grade = as.factor(pheno_data$Grade)
+pheno_data$Recurrence = as.factor(pheno_data$Recurrence)
+pheno_data$her2_ihc_score = as.factor(pheno_data$her2_ihc_score)
+pheno_data$pr_status_by_ihc = as.factor(pheno_data$pr_status_by_ihc)
+pheno_data$er_status_by_ihc = as.factor(pheno_data$er_status_by_ihc)
+pheno_data$her2_fish_status = as.factor(pheno_data$her2_fish_status)
+pheno_data$Tumour_Microenvironment_Score = as.factor(pheno_data$Tumour_Microenvironment_Score)
+pheno_data$New_tumour_event = as.factor(pheno_data$New_tumour_event)
+```
+
+#Survival Data subset
+
+```{r}
+# Survival data ----------------------------------------------------------------
+surv_data <- fread(
+  file = "survivaldata_7922cases.csv",
+  sep = ",",
+  header = T,
+  na.strings = NULL,
+  stringsAsFactors = F,
+  logical01 = T,
+  data.table = F
+)
+row.names(surv_data) <- surv_data$Sample_ID
+surv_data$Sample_ID <- NULL
+```
+```{r}
+survival_data = surv_data 
+survival_data$vital_status = as.factor(survival_data$vital_status)
+survival_data$vital_status <- ifelse(survival_data$vital_status == "Dead", 2, 1)
+
+survival_data = dplyr::select(survival_data, c("Patient_ID", "vital_status", "OS_time", "OS_censor"))
+survival_data = merge(survival_data,pheno_data, by.x="Patient_ID")
+survival_data = survival_data[!is.na(survival_data$Sample_ID),]
+
+survival_data<-survival_data[!(survival_data$OS_censor==-9),]
+
+```
+
+```{r}
+write.csv(pheno_data,'NMF_clinical_data_final.csv')
+write.csv(survival_data,'NMF_survival_data_final.csv')
+```
+#Combine pheno data and NMF factors values for models
+```{r}
+factors = patient_data
+factors = dplyr::select(factors, -"Sample_ID")
+#Phenotype combo with all 10274 patients
+pheno_combo = merge(factors,pheno_data, by.x="Patient_ID")
+#Survival combo with only the 7922 survival data patients
+survival_combo = merge(factors,survival_data, by.x="Patient_ID")
+```
+
+pheno_data and survival_data are the main data frames used for biological analysis.
+
+They are saved in the repo as NMF_clinical_data_final.csv and NMF_survival_data_final.csv, respectively. 
+
+
+
+

@@ -1,0 +1,2061 @@
+---
+title: "Factor 82 analysis"
+author: "Daniel Skubleny"
+date: '2023-01-12'
+output: html_document
+---
+
+
+The premise of this analysis is to determine if the NMF factors could identify any possible signals related to treatment effects (beyond pure prognosis). We examined the differential expression analysis of the genes and found candidate Factors. Next we examined available TCGA treatment data. The anti-VEGF treatment was a promising group because it contained multiple different types of cancers and thus a "Pan-Cancer" analysis could be performed. This code highlights the method to achieve the results and figures in the paper.  
+
+
+```{r}
+library(TCGAbiolinks)
+library(EnhancedVolcano)
+library(clusterProfiler)
+library(msigdbr)
+library(AnnotationDbi)
+library(ggupset)
+library(ggnewscale)
+library(DOSE)
+library(ggridges)
+library(mgcv)
+library(plyr)
+library(dplyr)
+
+```
+
+#Load all data for TCGA studies included in the survival analysis. LAML has entirely different data and specific therapy techniques--- will exclude
+Here we retrieve the clinical data and compile it from TCGA biolinks. 
+####BRCA
+```{r}
+query <- GDCquery(project = "TCGA-BRCA", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+brca.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+brca.clinical.drug = brca.clinical.BCRtab.all[["clinical_drug_brca"]]
+brca.clinical.drug = brca.clinical.drug[-c(1,2),]
+brca.clinical.drug = dplyr::select(brca.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####STAD
+```{r}
+query <- GDCquery(project = "TCGA-STAD", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+stad.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+stad.clinical.drug = stad.clinical.BCRtab.all[["clinical_drug_stad"]]
+stad.clinical.drug = stad.clinical.drug[-c(1,2),]
+stad.clinical.drug = dplyr::select(stad.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####COAD
+```{r}
+query <- GDCquery(project = "TCGA-COAD", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+coad.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+coad.clinical.drug = coad.clinical.BCRtab.all[["clinical_drug_coad"]]
+coad.clinical.drug = coad.clinical.drug[-c(1,2),]
+coad.clinical.drug = dplyr::select(coad.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####KIRC
+```{r}
+query <- GDCquery(project = "TCGA-KIRC", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+kirc.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+kirc.clinical.drug = kirc.clinical.BCRtab.all[["clinical_drug_kirc"]]
+kirc.clinical.drug = kirc.clinical.drug[-c(1,2),]
+kirc.clinical.drug = dplyr::select(kirc.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####BLCA
+```{r}
+query <- GDCquery(project = "TCGA-BLCA", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+blca.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+blca.clinical.drug = blca.clinical.BCRtab.all[["clinical_drug_blca"]]
+blca.clinical.drug = blca.clinical.drug[-c(1,2),]
+blca.clinical.drug = dplyr::select(blca.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####CESC
+```{r}
+query <- GDCquery(project = "TCGA-CESC", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+cesc.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+cesc.clinical.drug = cesc.clinical.BCRtab.all[["clinical_drug_cesc"]]
+cesc.clinical.drug = cesc.clinical.drug[-c(1,2),]
+cesc.clinical.drug = dplyr::select(cesc.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####ESCA
+```{r}
+query <- GDCquery(project = "TCGA-ESCA", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+esca.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+esca.clinical.drug = esca.clinical.BCRtab.all[["clinical_drug_esca"]]
+esca.clinical.drug = esca.clinical.drug[-c(1,2),]
+esca.clinical.drug = dplyr::select(esca.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####GBM
+```{r}
+query <- GDCquery(project = "TCGA-GBM", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+gbm.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+gbm.clinical.drug = gbm.clinical.BCRtab.all[["clinical_drug_gbm"]]
+gbm.clinical.drug = gbm.clinical.drug[-c(1,2),]
+gbm.clinical.drug = dplyr::select(gbm.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####HNSC
+```{r}
+query <- GDCquery(project = "TCGA-HNSC", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+hnsc.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+hnsc.clinical.drug = hnsc.clinical.BCRtab.all[["clinical_drug_hnsc"]]
+hnsc.clinical.drug = hnsc.clinical.drug[-c(1,2),]
+hnsc.clinical.drug = dplyr::select(hnsc.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####LGG
+```{r}
+query <- GDCquery(project = "TCGA-LGG", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+lgg.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+lgg.clinical.drug = lgg.clinical.BCRtab.all[["clinical_drug_lgg"]]
+lgg.clinical.drug = lgg.clinical.drug[-c(1,2),]
+lgg.clinical.drug = dplyr::select(lgg.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####LIHC
+```{r}
+query <- GDCquery(project = "TCGA-LIHC", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+lihc.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+lihc.clinical.drug = lihc.clinical.BCRtab.all[["clinical_drug_lihc"]]
+lihc.clinical.drug = lihc.clinical.drug[-c(1,2),]
+lihc.clinical.drug = dplyr::select(lihc.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####LUAD
+```{r}
+query <- GDCquery(project = "TCGA-LUAD", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+luad.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+luad.clinical.drug = luad.clinical.BCRtab.all[["clinical_drug_luad"]]
+luad.clinical.drug = luad.clinical.drug[-c(1,2),]
+luad.clinical.drug = dplyr::select(luad.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####LUSC
+```{r}
+query <- GDCquery(project = "TCGA-LUSC", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+lusc.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+lusc.clinical.drug = lusc.clinical.BCRtab.all[["clinical_drug_lusc"]]
+lusc.clinical.drug = lusc.clinical.drug[-c(1,2),]
+lusc.clinical.drug = dplyr::select(lusc.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####MESO
+```{r}
+query <- GDCquery(project = "TCGA-MESO", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+meso.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+meso.clinical.drug = meso.clinical.BCRtab.all[["clinical_drug_meso"]]
+meso.clinical.drug = meso.clinical.drug[-c(1,2),]
+meso.clinical.drug = dplyr::select(meso.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####OV
+```{r}
+query <- GDCquery(project = "TCGA-OV", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+ov.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+ov.clinical.drug = ov.clinical.BCRtab.all[["clinical_drug_ov"]]
+ov.clinical.drug = ov.clinical.drug[-c(1,2),]
+ov.clinical.drug = dplyr::select(ov.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####PAAD
+```{r}
+query <- GDCquery(project = "TCGA-PAAD", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+paad.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+paad.clinical.drug = paad.clinical.BCRtab.all[["clinical_drug_paad"]]
+paad.clinical.drug = paad.clinical.drug[-c(1,2),]
+paad.clinical.drug = dplyr::select(paad.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####SARC
+```{r}
+query <- GDCquery(project = "TCGA-SARC", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+sarc.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+sarc.clinical.drug = sarc.clinical.BCRtab.all[["clinical_drug_sarc"]]
+sarc.clinical.drug = sarc.clinical.drug[-c(1,2),]
+sarc.clinical.drug = dplyr::select(sarc.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####SKCM
+```{r}
+query <- GDCquery(project = "TCGA-SKCM", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+skcm.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+skcm.clinical.drug = skcm.clinical.BCRtab.all[["clinical_drug_skcm"]]
+skcm.clinical.drug = skcm.clinical.drug[-c(1,2),]
+skcm.clinical.drug = dplyr::select(skcm.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+####UCEC
+```{r}
+query <- GDCquery(project = "TCGA-UCEC", 
+                  data.category = "Clinical",
+                  data.type = "Clinical Supplement", 
+                  data.format = "BCR Biotab")
+GDCdownload(query)
+ucec.clinical.BCRtab.all <- GDCprepare(query)
+```
+```{r}
+ucec.clinical.drug = ucec.clinical.BCRtab.all[["clinical_drug_ucec"]]
+ucec.clinical.drug = ucec.clinical.drug[-c(1,2),]
+ucec.clinical.drug = dplyr::select(ucec.clinical.drug, c("bcr_patient_uuid", "bcr_patient_barcode","bcr_drug_barcode","bcr_drug_uuid","form_completion_date","pharmaceutical_therapy_drug_name","clinical_trial_drug_classification","pharmaceutical_therapy_type","pharmaceutical_tx_started_days_to", "pharmaceutical_tx_ongoing_indicator", "pharmaceutical_tx_ended_days_to", "treatment_best_response", "days_to_stem_cell_transplantation","route_of_administration","stem_cell_transplantation","stem_cell_transplantation_type","tx_on_clinical_trial"))   
+```
+
+#Combining Clinical Drug Data
+```{r}
+#Combine data frames using r bind for 
+clinical_drug = rbind(brca.clinical.drug, stad.clinical.drug)
+clinical_drug = rbind(clinical_drug,coad.clinical.drug)
+clinical_drug = rbind(clinical_drug,kirc.clinical.drug)
+clinical_drug = rbind(clinical_drug,blca.clinical.drug)
+clinical_drug = rbind(clinical_drug,cesc.clinical.drug)
+clinical_drug = rbind(clinical_drug,gbm.clinical.drug)
+clinical_drug = rbind(clinical_drug,hnsc.clinical.drug)
+clinical_drug = rbind(clinical_drug,lgg.clinical.drug)
+clinical_drug = rbind(clinical_drug,lihc.clinical.drug)
+clinical_drug = rbind(clinical_drug,luad.clinical.drug)
+clinical_drug = rbind(clinical_drug,lusc.clinical.drug)
+clinical_drug = rbind(clinical_drug,meso.clinical.drug)
+clinical_drug = rbind(clinical_drug,ov.clinical.drug)
+clinical_drug = rbind(clinical_drug,paad.clinical.drug)
+clinical_drug = rbind(clinical_drug,sarc.clinical.drug)
+clinical_drug = rbind(clinical_drug,skcm.clinical.drug)
+clinical_drug = rbind(clinical_drug,ucec.clinical.drug)
+clinical_drug_original = clinical_drug
+```
+```{r}
+#Change column name
+colnames(clinical_drug)[which(names(clinical_drug) == "bcr_patient_barcode")] <- "Patient_ID"
+
+```
+
+#Volcano Plot set up 
+```{r}
+load("/Users/danielskubleny/Documents/R projects/Topics/NMF/VAE characterization/top_genes_subset.RData")
+
+#Data is loaded in Factor_models
+top_genes = top_genes_subset
+
+factor82 = top_genes[["F82"]]
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = row.names(factor82)
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V1")] <- "gene_id"
+
+factor82$gene_id = genenames$gene_id
+  
+```
+
+#Edit the EnhancedVolcano function to achieve the desired figure
+```{r}
+EnhancedVolcano <- function(
+  toptable,
+  lab,
+  x,
+  y,
+  selectLab = NULL,
+  xlim = c(min(toptable[[x]], na.rm=TRUE) - 1.5,
+    max(toptable[[x]], na.rm=TRUE) + 1.5),
+  ylim = c(0, max(-log10(toptable[[y]]), na.rm=TRUE) + 5),
+  xlab = bquote(~Log[2]~ "fold change"),
+  ylab = bquote(~-Log[10]~italic(P)),
+  axisLabSize = 18,
+  title = 'Volcano plot',
+  subtitle = bquote(italic(EnhancedVolcano)),
+  caption = paste0('total = ', nrow(toptable), ' variables'),
+  titleLabSize = 18,
+  subtitleLabSize = 14,
+  captionLabSize = 14,
+  pCutoff = 10e-6,
+  pCutoffCol = y,
+  FCcutoff = 1.0,
+  cutoffLineType = 'longdash',
+  cutoffLineCol = 'black',
+  cutoffLineWidth = 0.4,
+  pointSize = 2.0,
+  labSize = 5.0,
+  labCol = 'black',
+  labFace = 'plain',
+  boxedLabels = FALSE,
+  parseLabels = FALSE,
+  shape = 19,
+  shapeCustom = NULL,
+  col = c('grey30', 'forestgreen', 'royalblue', 'red2'),
+  colCustom = NULL,
+  colAlpha = 1/2,
+  colGradient = NULL,
+  colGradientBreaks = c(pCutoff, 1.0),
+  colGradientLabels = c('0', '1.0'),
+  colGradientLimits = c(0, 1.0),
+  legendLabels = c('NS', expression(Log[2]~FC),
+    'p-value', expression(p-value~and~log[2]~FC)),
+  legendPosition = 'top',
+  legendLabSize = 14,
+  legendIconSize = 5.0,
+  legendDropLevels = TRUE,
+  encircle = NULL,
+  encircleCol = 'black',
+  encircleFill = 'pink',
+  encircleAlpha = 3/4,
+  encircleSize = 2.5,
+  shade = NULL,
+  shadeFill = 'grey',
+  shadeAlpha = 1/2,
+  shadeSize = 0.01,
+  shadeBins = 2,
+  drawConnectors = FALSE,
+  widthConnectors = 0.5,
+  typeConnectors = 'closed',
+  endsConnectors = 'first',
+  lengthConnectors = unit(0.01, 'npc'),
+  colConnectors = 'grey10',
+  max.overlaps = 15,
+  maxoverlapsConnectors = NULL,
+  min.segment.length = 0,
+  directionConnectors = 'both',
+  arrowheads = TRUE,
+  hline = NULL,
+  hlineType = 'longdash',
+  hlineCol = 'black',
+  hlineWidth = 0.4,
+  vline = NULL,
+  vlineType = 'longdash',
+  vlineCol = 'black',
+  vlineWidth = 0.4,
+  gridlines.major = TRUE,
+  gridlines.minor = TRUE,
+  border = 'partial',
+  borderWidth = 0.8,
+  borderColour = 'black', 
+  raster = FALSE)
+{
+  if(!is.numeric(toptable[[x]])) {
+    stop(paste(x, ' is not numeric!', sep=''))
+  }
+
+  if(!is.numeric(toptable[[pCutoffCol]])) {
+    stop(paste(y, ' is not numeric!', sep=''))
+  }
+  
+  if (raster) {
+    geom_point <- geom_point_rast
+  }
+
+  if (!is.null(maxoverlapsConnectors)) {
+    max.overlaps <- maxoverlapsConnectors
+  }
+
+  i <- xvals <- yvals <- Sig <- NULL
+
+  toptable <- as.data.frame(toptable)
+  toptable$Sig <- 'NS'
+  toptable$Sig[(abs(toptable[[x]]) > FCcutoff)] <- 'FC'
+
+  toptable$Sig[(toptable[[pCutoffCol]] > pCutoff)] <- 'P'
+  toptable$Sig[(toptable[[pCutoffCol]] > pCutoff) &
+    (abs(toptable[[x]]) > FCcutoff)] <- 'FC_P'
+  toptable$Sig <- factor(toptable$Sig,
+    levels=c('NS','FC','P','FC_P'))
+  # reset pCutoff to corresponding value on y
+  # allowing to draw hline at the correct
+  # threshold
+  if (pCutoffCol != y) {
+    pCutoff = max(
+      toptable[which(
+        toptable[pCutoffCol] <= pCutoff), y]
+      )
+  }
+  # some software programs return 0 for very low p-values
+  # These throw an error in EnhancedVolcano
+  # Detect these, issue warning, and convert these to
+  # machine-lowest value possible
+  #####
+  # New functionality in > v1.2:
+  # Now convert to 10^-1 lower than lowest non-zero p-value
+  if (min(toptable[[y]], na.rm=TRUE) == 0) {
+    # <= v1.2
+    #warning(paste("One or more P values is 0.",
+    #  "Converting to minimum possible value..."),
+    #  call. = FALSE)
+    #toptable[which(toptable[[y]] == 0), y] <- .Machine$double.xmin
+    warning(paste('One or more p-values is 0.',
+      'Converting to 10^-1 * current',
+      'lowest non-zero p-value...'),
+      call. = FALSE)
+    toptable[which(toptable[[y]] == 0), y] <- min(
+      toptable[which(toptable[[y]] != 0), y],
+      na.rm = TRUE) * 10^-1
+  }
+
+  toptable$lab <- lab
+  toptable$xvals <- toptable[[x]]
+  toptable$yvals <- toptable[[y]]
+
+  # If user has supplied values in selectLab, convert labels to
+  # NA and then re-set with those in selectLab
+  if (!is.null(selectLab)) {
+    names.new <- rep(NA, length(toptable$lab))
+    indices <- which(toptable$lab %in% selectLab)
+    names.new[indices] <- toptable$lab[indices]
+    toptable$lab <- names.new
+  }
+
+  # create a base theme that will later be modified
+  th <- theme_bw(base_size = 24) +
+
+    theme(
+      legend.background = element_rect(),
+
+      # title, subtitle, and caption
+      plot.title = element_text(
+        angle = 0,
+        size = titleLabSize,
+        face = 'bold',
+        vjust = 1),
+      plot.subtitle = element_text(
+        angle = 0,
+        size = subtitleLabSize,
+        face = 'plain',
+        vjust = 1),
+      plot.caption = element_text(
+        angle = 0,
+        size = captionLabSize,
+        face = 'plain',
+        vjust = 1),
+
+      # axis text
+      axis.text.x = element_text(
+        angle = 0,
+        size = axisLabSize,
+        vjust = 1),
+      axis.text.y = element_text(
+        angle = 0,
+        size = axisLabSize,
+        vjust = 0.5),
+      axis.title = element_text(
+        size = axisLabSize),
+
+      # legend
+      legend.position = legendPosition,
+      legend.key = element_blank(),
+      legend.key.size = unit(0.5, 'cm'),
+      legend.text = element_text(
+        size = legendLabSize),
+      title = element_text(
+        size = legendLabSize),
+      legend.title = element_blank())
+
+  # Create the plot object differently based on whether colCustom 
+  # and shapeCustom are NULL or not. This helps to avoid messing up
+  # the legend.
+  #
+  # 1, both colCustom and shapeCustom are activated
+  if (!is.null(colCustom) & !is.null(shapeCustom)) {
+
+    plot <- ggplot(toptable, aes(x=xvals, y=(yvals))) + th +
+
+      # over-ride legend icon sizes for colour and shape.
+      # guide_legends are separate for colour and shape;
+      # so, legends will be drawn separate
+      guides(
+        colour = guide_legend(
+          order = 1,
+          override.aes = list(
+            size = legendIconSize)),
+        shape = guide_legend(
+          order = 2,
+          override.aes = list(
+            size = legendIconSize))) +
+
+      # include new shape and colour encodings as aes
+      geom_point(
+        aes(
+          color = factor(names(colCustom)),
+          shape = factor(names(shapeCustom))),
+        alpha = colAlpha,
+        size = pointSize,
+        na.rm = TRUE) +
+
+      # specify the colour and shape with the supplied encoding
+      scale_color_manual(values = colCustom) +
+      scale_shape_manual(values = shapeCustom)
+
+  # 2, only colCustom is activated and 'shape' has just a single value
+  } else if (!is.null(colCustom) & is.null(shapeCustom) & length(shape) == 1) {
+
+    plot <- ggplot(toptable, aes(x=xvals, y=(yvals))) + th +
+
+      # over-ride legend icon sizes for colour and shape.
+      # guide_legends are separate for colour and shape;
+      # so, legends will be drawn separate IF shape is also
+      # included as aes to geom_point (it is not, here)
+      guides(
+        colour = guide_legend(
+          order = 1,
+          override.aes = list(
+            size = legendIconSize)),
+        shape = guide_legend(
+          order = 2,
+          override.aes = list(
+            size = legendIconSize))) +
+
+      # include new colour encodings as aes.
+      # 'shape' is included, but outside aes
+      geom_point(
+        aes(
+          color = factor(names(colCustom))),
+        alpha = colAlpha,
+        shape = shape,
+        size = pointSize,
+        na.rm = TRUE) +
+
+      # specify the colour with the supplied encoding
+      scale_color_manual(values = colCustom) +
+
+      # 'shape' is not included as aes. Specifying guide = TRUE
+      # here will result in legends merging
+      scale_shape_manual(guide = TRUE)
+
+  # 3, only colCustom is activated and 'shape' has 4 values
+  } else if (!is.null(colCustom) & is.null(shapeCustom) & length(shape) == 4) {
+
+    plot <- ggplot(toptable, aes(x=xvals, y=(yvals))) + th +
+
+      # over-ride legend icon sizes for colour and shape.
+      # guide_legends are separate for colour and shape;
+      # so, legends will be drawn separate
+      guides(
+        colour = guide_legend(
+          order = 1,
+          override.aes = list(
+            size = legendIconSize)),
+        shape = guide_legend(
+          order = 2,
+          override.aes = list(
+            size = legendIconSize))) +
+
+      # include new colour encodings as aes.
+      # 'shape' is included in aes and mapped to 4
+      # categories of NS, FC, P, FC_P
+      geom_point(
+        aes(
+          color = factor(names(colCustom)),
+          shape = Sig),
+        alpha = colAlpha,
+        size = pointSize,
+        na.rm = TRUE) +
+
+      # specify the colour with the supplied encoding
+      scale_color_manual(values = colCustom) +
+
+      # as it is included as aes, a separate legend
+      # for 'shape' will be drawn. Here, over-ride that
+      # legend
+      scale_shape_manual(
+        values = c(
+          NS = shape[1],
+          FC = shape[2],
+          P = shape[3],
+          FC_P = shape[4]),
+        labels = c(
+          NS = legendLabels[1],
+          FC = legendLabels[2],
+          P = legendLabels[3],
+          FC_P = legendLabels[4]),
+        guide = TRUE,
+        drop = legendDropLevels)
+
+  # 4, only shapeCustom is activated
+  } else if (is.null(colCustom) & !is.null(shapeCustom)) {
+
+    if (is.null(colGradient)) {
+
+      plot <- ggplot(toptable, aes(x = xvals, y = (yvals))) + th +
+
+        # over-ride legend icon sizes for colour and shape.
+        # guide_legends are separate for colour and shape;
+        # so, legends will be drawn separate
+        guides(
+          colour = guide_legend(
+            order = 1,
+            override.aes = list(
+              size = legendIconSize)),
+          shape = guide_legend(
+            order = 2,
+            override.aes = list(
+              size = legendIconSize))) +
+
+        # include new shape encodings as aes.
+        # Standard colour for NS, FC, P, FC_P,
+        # are added to aes, too.
+        geom_point(
+          aes(
+            color = Sig,
+            shape = factor(names(shapeCustom))),
+          alpha = colAlpha,
+          size = pointSize,
+          na.rm = TRUE) +
+
+        # as it is included as aes, a separate legend
+        # for 'colour' will be drawn. Here, over-ride that
+        # legend
+        scale_color_manual(
+          values = c(
+            NS = col[1],
+            FC = col[2],
+            P = col[3],
+            FC_P = col[4]),
+          labels = c(
+            NS = legendLabels[1],
+            FC = legendLabels[2],
+            P = legendLabels[3],
+            FC_P = legendLabels[4]),
+          drop = legendDropLevels) +
+
+        # specify the shape with the supplied encoding
+        scale_shape_manual(values = shapeCustom)
+
+    } else {
+
+      plot <- ggplot(toptable, aes(x = xvals, y = (yvals))) + th +
+
+        # over-ride legend icon sizes for colour and shape.
+        # guide_legends are separate for colour and shape;
+        # so, legends will be drawn separate
+        guides(
+          shape = guide_legend(
+            order = 2,
+            override.aes = list(
+              size = legendIconSize))) +
+
+        # include new shape encodings as aes.
+        # Standard colour for NS, FC, P, FC_P,
+        # are added to aes, too.
+        geom_point(
+          aes(
+            color = Sig,
+            shape = factor(names(shapeCustom))),
+          alpha = colAlpha,
+          size = pointSize,
+          na.rm = TRUE) +
+
+        scale_colour_gradient(
+          low = colGradient[1],
+          high = colGradient[2],
+          limits = colGradientLimits,
+          breaks = colGradientBreaks,
+          labels = colGradientLabels)
+
+        # specify the shape with the supplied encoding
+        scale_shape_manual(values = shapeCustom)
+
+    }
+
+  # 5, both colCustom and shapeCustom are null;
+  # only a single shape value specified
+  } else if (is.null(colCustom) & is.null(shapeCustom) & length(shape) == 1) {
+
+    if (is.null(colGradient)) {
+
+      plot <- ggplot(toptable, aes(x = xvals, y = (yvals))) + th +
+
+        # over-ride legend icon sizes for colour and shape.
+        # including 'shape' in the colour guide_legend here
+        # results in the legends merging
+        guides(colour = guide_legend(
+          order = 1,
+          override.aes = list(
+            shape = shape,
+            size = legendIconSize))) +
+
+        geom_point(
+          aes(color = Sig),
+          alpha = colAlpha,
+          shape = shape,
+          size = pointSize,
+          na.rm = TRUE) +
+
+        scale_color_manual(
+          values = c(
+            NS = col[1],
+            FC = col[2],
+            P = col[3],
+            FC_P = col[4]),
+          labels = c(
+            NS = legendLabels[1],
+            FC = legendLabels[2],
+            P = legendLabels[3],
+            FC_P = legendLabels[4]),
+          drop = legendDropLevels)
+
+    } else {
+
+      plot <- ggplot(toptable, aes(x = xvals, y = (yvals))) + th +
+
+        geom_point(
+          aes(color = yvals),
+          alpha = colAlpha,
+          shape = shape,
+          size = pointSize,
+          na.rm = TRUE) +
+
+        scale_colour_gradient(
+          low = colGradient[1],
+          high = colGradient[2],
+          limits = colGradientLimits,
+          breaks = colGradientBreaks,
+          labels = colGradientLabels)
+    }
+
+  # 6, both colCustom and shapeCustom are null;
+  # four shape values are specified
+  } else if (is.null(colCustom) & is.null(shapeCustom) & length(shape) == 4) {
+
+    if (is.null(colGradient)) {
+      plot <- ggplot(toptable, aes(x = xvals, y = (yvals))) + th +
+
+        # over-ride legend icon sizes for colour and shape.
+        # including 'shape' in the colour guide_legend here
+        # results in the legends merging
+        guides(colour = guide_legend(
+          order = 1,
+          override.aes = list(
+            shape = c(
+              NS = shape[1],
+              FC = shape[2],
+              P = shape[3],
+              FC_P = shape[4]),
+            size = legendIconSize))) +
+
+        geom_point(
+          aes(
+            color = Sig,
+            shape = Sig),
+          alpha = colAlpha,
+          size = pointSize,
+          na.rm = TRUE) +
+
+        scale_color_manual(
+          values = c(
+            NS = col[1],
+            FC = col[2],
+            P = col[3],
+            FC_P = col[4]),
+          labels = c(
+            NS = legendLabels[1],
+            FC = legendLabels[2],
+            P = legendLabels[3],
+            FC_P = legendLabels[4]),
+          drop = legendDropLevels) +
+
+        scale_shape_manual(
+          values = c(
+            NS = shape[1],
+            FC = shape[2],
+            P = shape[3],
+            FC_P = shape[4]),
+          guide = FALSE,
+          drop = legendDropLevels)
+
+    } else {
+
+      plot <- ggplot(toptable, aes(x = xvals, y = (yvals))) + th +
+
+        geom_point(
+          aes(
+            color = yvals,
+            shape = Sig),
+          alpha = colAlpha,
+          size = pointSize,
+          na.rm = TRUE) +
+
+        scale_colour_gradient(
+          low = colGradient[1],
+          high = colGradient[2],
+          limits = colGradientLimits,
+          breaks = colGradientBreaks,
+          labels = colGradientLabels) +
+
+        scale_shape_manual(
+          values = c(
+            NS = shape[1],
+            FC = shape[2],
+            P = shape[3],
+            FC_P = shape[4]),
+          guide = FALSE,
+          drop = legendDropLevels)
+
+    }
+  }
+
+  # add more elements to the plot
+  plot <- plot +
+
+    xlab(xlab) +
+    ylab(ylab) +
+
+    xlim(xlim[1], xlim[2]) +
+    ylim(ylim[1], ylim[2]) +
+
+    geom_vline(xintercept = c(-FCcutoff, FCcutoff),
+      linetype = cutoffLineType,
+      colour = cutoffLineCol,
+      size = cutoffLineWidth) +
+
+    geom_hline(yintercept = (pCutoff),
+      linetype = cutoffLineType,
+      colour = cutoffLineCol,
+      size = cutoffLineWidth)
+
+  # add elements to the plot for title, subtitle, caption
+  plot <- plot + labs(title = title, 
+    subtitle = subtitle, caption = caption)
+
+  # add elements to the plot for vlines and hlines
+  if (!is.null(vline)) {
+    plot <- plot + geom_vline(xintercept = vline,
+      linetype = vlineType,
+      colour = vlineCol,
+      size = vlineWidth)
+  }
+  if (!is.null(hline)) {
+    plot <- plot + geom_hline(yintercept = (hline),
+      linetype = hlineType,
+      colour = hlineCol,
+      size = hlineWidth)
+  }
+
+  # Border around plot
+  if (border == 'full') {
+    plot <- plot + theme(panel.border = element_rect(
+      colour = borderColour, fill = NA, size = borderWidth))
+  } else if (border == 'partial') {
+    plot <- plot + theme(axis.line = element_line(
+      size = borderWidth, colour = borderColour),
+      panel.border = element_blank(),
+      panel.background = element_blank())
+  } else {
+    stop('Unrecognised value passed to \'border\'. Must be \'full\' or \'partial\'')
+  }
+
+  # Gridlines
+  if (gridlines.major) {
+    plot <- plot + theme(panel.grid.major = element_line())
+  } else {
+    plot <- plot + theme(panel.grid.major = element_blank())
+  }
+  if (gridlines.minor) {
+    plot <- plot + theme(panel.grid.minor = element_line())
+  } else {
+    plot <- plot + theme(panel.grid.minor = element_blank())
+  }
+
+  # user has specified to draw with geom_text or geom_label?
+  if (!boxedLabels) {
+
+    # For labeling with geom_[text|label]_repel and
+    # geom_[text|label] with check_overlap = TRUE, 4 possible
+    # scenarios can arise
+    if (drawConnectors && is.null(selectLab)) {
+
+      if (arrowheads) {
+        arr <- arrow(length = lengthConnectors,
+          type = typeConnectors, ends = endsConnectors)
+      } else {
+        arr <- NULL
+      }
+
+      plot <- plot + geom_text_repel(
+        data = subset(toptable,
+          toptable[[y]] < pCutoff &
+            abs(toptable[[x]]) > FCcutoff),
+        aes(label = subset(toptable,
+          toptable[[y]] < pCutoff &
+            abs(toptable[[x]]) > FCcutoff)[["lab"]]),
+        xlim = c(NA, NA),
+        ylim = c(NA, NA),
+        size = labSize,
+        segment.color = colConnectors,
+        segment.size = widthConnectors,
+        arrow = arr,
+        colour = labCol,
+        fontface = labFace,
+        parse = parseLabels,
+        na.rm = TRUE,
+        direction = directionConnectors,
+        max.overlaps = max.overlaps,
+        min.segment.length = min.segment.length)
+
+    } else if (drawConnectors && !is.null(selectLab)) {
+
+      if (arrowheads) {
+        arr <- arrow(length = lengthConnectors,
+          type = typeConnectors, ends = endsConnectors)
+      } else {
+        arr <- NULL
+      }
+
+      plot <- plot + geom_text_repel(
+        data = subset(toptable,
+          !is.na(toptable[['lab']])),
+        aes(label = subset(toptable,
+          !is.na(toptable[['lab']]))[['lab']]),
+        xlim = c(NA, NA),
+        ylim = c(NA, NA),
+        size = labSize,
+        segment.color = colConnectors,
+        segment.size = widthConnectors,
+        arrow = arr,
+        colour = labCol,
+        fontface = labFace,
+        parse = parseLabels,
+        na.rm = TRUE,
+        direction = directionConnectors,
+        max.overlaps = max.overlaps,
+        min.segment.length = min.segment.length)
+
+    } else if (!drawConnectors && !is.null(selectLab)) {
+
+      plot <- plot + geom_text(
+        data = subset(toptable,
+          !is.na(toptable[['lab']])),
+        aes(
+          label = subset(toptable,
+            !is.na(toptable[['lab']]))[['lab']]),
+        size = labSize,
+        check_overlap = TRUE,
+        colour = labCol,
+        fontface = labFace,
+        parse = parseLabels,
+        na.rm = TRUE)
+
+    } else if (!drawConnectors && is.null(selectLab)) {
+
+      plot <- plot + geom_text(
+        data = subset(toptable,
+          toptable[[y]] < pCutoff &
+            abs(toptable[[x]]) > FCcutoff),
+        aes(label = subset(toptable,
+          toptable[[y]] < pCutoff &
+            abs(toptable[[x]]) > FCcutoff)[['lab']]),
+        size = labSize,
+        check_overlap = TRUE,
+        colour = labCol,
+        fontface = labFace,
+        parse = parseLabels,
+        na.rm = TRUE)
+    }
+
+  } else {
+
+    # For labeling with geom_[text|label]_repel and
+    # geom_[text|label] with check_overlap = TRUE, 4 possible
+    # scenarios can arise
+    if (drawConnectors && is.null(selectLab)) {
+
+      if (arrowheads) {
+        arr <- arrow(length = lengthConnectors,
+          type = typeConnectors, ends = endsConnectors)
+      } else {
+        arr <- NULL
+      }
+
+      plot <- plot + geom_label_repel(
+        data = subset(toptable,
+          toptable[[y]] < pCutoff &
+            abs(toptable[[x]]) > FCcutoff),
+        aes(label = subset(toptable,
+          toptable[[y]]<pCutoff &
+            abs(toptable[[x]]) > FCcutoff)[['lab']]),
+        xlim = c(NA, NA),
+        ylim = c(NA, NA),
+        size = labSize,
+        segment.color = colConnectors,
+        segment.size = widthConnectors,
+        arrow = arr,
+        colour = labCol,
+        fontface = labFace,
+        parse = parseLabels,
+        na.rm = TRUE,
+        direction = directionConnectors,
+        max.overlaps = max.overlaps,
+        min.segment.length = min.segment.length)
+
+    } else if (drawConnectors && !is.null(selectLab)) {
+
+      if (arrowheads) {
+        arr <- arrow(length = lengthConnectors,
+          type = typeConnectors, ends = endsConnectors)
+      } else {
+        arr <- NULL
+      }
+
+      plot <- plot + geom_label_repel(
+        data = subset(toptable,
+          !is.na(toptable[['lab']])),
+        aes(label = subset(toptable,
+          !is.na(toptable[['lab']]))[['lab']]),
+        xlim = c(NA, NA),
+        ylim = c(NA, NA),
+        size = labSize,
+        segment.color = colConnectors,
+        segment.size = widthConnectors,
+        arrow = arr,
+        colour = labCol,
+        fontface = labFace,
+        parse = parseLabels,
+        na.rm = TRUE,
+        direction = directionConnectors,
+        max.overlaps = max.overlaps,
+        min.segment.length = min.segment.length)
+
+    } else if (!drawConnectors && !is.null(selectLab)) {
+
+      plot <- plot + geom_label(
+        data = subset(toptable,
+          !is.na(toptable[["lab"]])),
+        aes(
+          label = subset(toptable,
+            !is.na(toptable[['lab']]))[['lab']]),
+        size = labSize,
+        colour = labCol,
+        fontface = labFace,
+        parse = parseLabels,
+        na.rm = TRUE)
+
+    } else if (!drawConnectors && is.null(selectLab)) {
+
+      plot <- plot + geom_label(
+        data = subset(toptable,
+          toptable[[y]] < pCutoff &
+            abs(toptable[[x]]) > FCcutoff),
+        aes(label = subset(toptable,
+          toptable[[y]] < pCutoff &
+            abs(toptable[[x]]) > FCcutoff)[['lab']]),
+        size = labSize,
+        colour = labCol,
+        fontface = labFace,
+        parse = parseLabels,
+        na.rm = TRUE)
+
+    }
+  }
+
+  # encircle
+  if (!is.null(encircle)) {
+    plot <- plot + 
+      geom_encircle(
+        data = subset(toptable,
+          rownames(toptable) %in% encircle),
+        colour = encircleCol,
+        fill = encircleFill,
+        alpha = encircleAlpha,
+        size = encircleSize,
+        show.legend = FALSE,
+        na.rm = TRUE)
+  }
+
+  # shade
+  if (!is.null(shade)) {
+    plot <- plot + 
+      stat_density2d(
+        data = subset(toptable,
+          rownames(toptable) %in% shade),
+        fill = shadeFill,
+        alpha = shadeAlpha,
+        geom = 'polygon',
+        contour = TRUE,
+        size = shadeSize,
+        bins = shadeBins,
+        show.legend = FALSE,
+        na.rm = TRUE)
+  }
+
+  plot <- plot + coord_cartesian(clip = 'off')
+
+  return(plot)
+}
+```
+#Volcano plot
+```{r}
+#NOTE: This volcano plot uses a modified Enhanced Volcano function... see above
+F82_volcano_new = EnhancedVolcano(factor82,
+    lab = factor82$gene_id,
+    x = 'logFC',
+    y = 'B',
+    xlab = bquote(~Log[2]~ "fold change"),
+    ylab = "B Statistic",
+    legendLabels = c('NS', expression(Log[2]~FC), 'B Statistic', expression(B~Statistic~and~log[2]~FC)),
+    col= c("grey30", "#A6CEE3", "royalblue", "red2"),
+    title = NULL,
+    subtitle = NULL,
+    caption = NULL,
+    ylim = c(-4,2000),
+    selectLab = c("DLL4","NOTCH4", "VEGFA", "CDH5", "ANGPT2", "PDGFB", "PECAM1","PGF", "FLT1", "FLT4", "FLK","KDR"),
+    axisLabSize = 12,
+    captionLabSize = 12,
+    labSize = 4,
+    legendLabSize = 12,
+    legendIconSize = 4,
+    pCutoff = 218,
+    FCcutoff = 10,
+    drawConnectors = TRUE,    
+    boxedLabels = TRUE,
+    lengthConnectors = unit(0.01, "npc"),
+    widthConnectors = 0.7,
+    borderWidth = 0.5,
+    typeConnectors = "closed",
+    legendPosition = "bottom")
+
+
+```
+```{r}
+ggsave("F82_volcano.svg",F82_volcano, width=6, height=5 )
+
+ggsave("F82_volcano.png", F82_volcano, width=6, height=5)
+
+ggsave("F82_volcano_new.svg",F82_volcano_new + coord_flip(), width=6, height=5 )
+
+ggsave("F82_volcano_new.png", F82_volcano_new + coord_flip(), width=6, height=5)
+```
+#Factor 82 GSEA
+```{r}
+geneList <- top_genes[["F82"]][,1]
+geneList = as.numeric(geneList)
+names(geneList) <- as.character(row.names(top_genes[["F82"]]))
+```
+```{r}
+#Make feature data table for future reference and annotation 
+genenames = as.character(row.names(top_genes[["F82"]]))
+```
+```{r}
+genenames = strsplit(genenames, '\\|', "")
+genenames = as.data.frame(genenames)
+genenames = t(genenames)
+genenames = as.data.frame(genenames)
+colnames(genenames)[which(names(genenames) == "V2")] <- "ENTREZID"
+
+entrezid = genenames$ENTREZID
+names(geneList) <- as.character(entrezid)
+
+gene_List <- sort(geneList, decreasing = TRUE)
+
+```
+```{r}
+m_t2g <- msigdbr(species = "Homo sapiens", category = "H") %>% dplyr::select(gs_name, entrez_gene)
+em82 <- GSEA(gene_List, TERM2GENE = m_t2g,eps= 0, nPermSimple = 10000)
+```
+```{r}
+dotplot(em82) + ggtitle("dotplot for GSEA")
+enrichplot::gseaplot2(em82, geneSetID = 1:5)
+ridgeplot(em82, showCategory=5, label_format = 20) + ggtitle("Ridgeplot Factor 82")
+```
+#Save plot
+```{r}
+png("ridgeplot_F82.png", width = 7, height = 7, units = 'in', res = 300)
+ridgeplot(em82, showCategory=5, label_format = 20) + ggtitle("Ridgeplot Factor 82")
+dev.off()
+
+svg("ridgeplot_F82.svg", width = 7, height = 7)
+ridgeplot(em82, showCategory=5, label_format = 20) + ggtitle("Ridgeplot Factor 82")
+dev.off()
+```
+
+#Isolate those treated with or without anti-vegf therapy.
+```{r}
+#Convert strings
+drug_vegf = clinical_drug
+
+drug_vegf = na_if(drug_vegf, '[Not Available]')
+drug_vegf = na_if(drug_vegf, '[Unknown]')
+
+drug_vegf$pharmaceutical_therapy_drug_name <- ifelse(grepl("bevacizumab", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Avastin (Bevacizumab)", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Carboplatin/Paclitaxel/Bevacizumab", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Bevacizumab Avastin", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Bevacizumab", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("BEVACIZUMAB", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Bevacozimab", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("BEVACIZumab", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Adriamycin, cytoxan, avastin", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("avastin", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Avastin", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("FOLFIRI/Avastin", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Investigal drug Avastin", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("HEC.1 - Sorafenib vs Sorafenib plus Doxorubicin", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("sorafenib", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Sorafenib", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("SORAFENIB", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Sorafenib - Nexavar", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Sorafenib (Bay 43-9006)", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Nexavaar", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Nexavar", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Sorafinib ( Nexavar)", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Sarafenib", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF", 
+          ifelse(grepl("pazopanib", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Pazopanib", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Votrient", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("dasatinib", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Dasatinib", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("regorafenib", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Regorafenib", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF",
+          ifelse(grepl("Cabozantinib", drug_vegf$pharmaceutical_therapy_drug_name, ignore.case = T), "anti-VEGF","Other")))))))))))))))))))))))))))))))
+
+
+drug_vegf = na_if(drug_vegf, '[Discrepancy]')
+drug_vegf = na_if(drug_vegf, '[Not Available]')
+
+drug_vegf$pharmaceutical_tx_started_days_to = as.numeric(drug_vegf$pharmaceutical_tx_started_days_to)
+drug_vegf$pharmaceutical_tx_ended_days_to = as.numeric(drug_vegf$pharmaceutical_tx_ended_days_to)
+
+drug_vegf$treatment_duration = drug_vegf$pharmaceutical_tx_ended_days_to - drug_vegf$pharmaceutical_tx_started_days_to
+
+```    
+
+
+```{r}
+survival_data <- read.csv("NMF_survival_data_final.csv", row.names=1)
+patient_data <- read.csv("nmf_coefficient_rank100_PanCancer_10274cases.csv")
+
+#VEGFanalysis 
+vegf_drug = dplyr::select(drug_vegf, c("Patient_ID","pharmaceutical_therapy_drug_name", "treatment_best_response","treatment_duration" ))
+
+VEGF_analysis = merge(survival_data,vegf_drug, by="Patient_ID", no.dups=TRUE)
+VEGF_analysis$vegf_status = VEGF_analysis$pharmaceutical_therapy_drug_name=='anti-VEGF'
+
+VEGF_analysis = VEGF_analysis %>%
+  group_by(Patient_ID, Type, vegf_status,Age, treatment_best_response) %>%
+  mutate(therapy = paste0('pharmaceutical_therapy_drug_name', row_number())) %>%
+  tidyr::spread(therapy, pharmaceutical_therapy_drug_name)
+
+VEGF_analysis = VEGF_analysis[!duplicated(VEGF_analysis$Patient_ID),] 
+
+VEGF_analysis = merge(patient_data,VEGF_analysis, by="Patient_ID")
+
+
+```
+
+
+#Analysis Master for ISD 
+```{r}
+#### File Information #####################################################################################################################
+#File Name: analysisMaster.R
+#Date Created: May 26, 2018
+#Author: Humza Haider
+#Email: hshaider@ualberta.ca
+
+### General Comments ######################################################################################################################
+#This file can act as a master file to analyze a given dataset with all modeling techniques and evaluation metrics.
+
+### Functions #############################################################################################################################
+
+## Function 1: analysisMaster = function(survivalDataset, numberOfFolds =5,
+#                                        CoxKP = T,CoxKPEN = T, KaplanMeier = T, RSFModel = T, AFTModel = T, MTLRModel =T, #Models
+#                                        DCal = T, OneCal = T, Concor = T, L1Measure = T, BrierInt = T, BrierSingle = T, #Evaluations
+#                                        DCalBins = 10, OneCalTime = NULL,  concordanceTies = "Risk", #Evaluation args
+#                                        SingleBrierTime = NULL, IntegratedBrierTimes = NULL, numBrierPoints = 1000, Ltype = "Margin", 
+#                                        Llog = F, typeOneCal = "DN", oneCalBuckets = 10, survivalPredictionMethod = "Median", 
+#                                        AFTDistribution = "weibull", #Model args,
+#                                        FS = T, imputeZero=T, verbose = T # Misc args)
+
+#Inputs: 
+# survivalDataset - This is the dataset one wishes to analyze. This must include 'time', 'delta', and at least 1 more feature. No default.
+# numberOfFolds - The number of desired cross-validation folds. Default is 5.
+# CoxKP, CoxKPEN, KaplanMeier, RSFModel, AFTModel, MTLRModel: Booleans specifying whether or not to run that model. Default is TRUE.
+# DCal, OneCal, Concor, L1Measure, BrierSingle, BrierInt: Booleans specifying whether or not to run that evaluation metric. Default is TRUE.
+# DCalBins: Number of bins for D-Calibration. Default is 10.
+# OneCalTime: An int specifying the time to evaluate 1-Calibration. If left as NULL but OneCal = TRUE, then the 10th, 25th, 50th, 75th,
+#             and 90th percentiless of all event times are used. Default is NULL.
+# concordanceTies: A string ("None", "Time", "Risk","All") indicating how to handle ties in concordance. Default is "Risk".
+# SingleBrierTime: The time to evaluate the Brier Score. If left as null, the 50th percentile of all event times is used. Default is NULL.
+# IntegratedBrierTimes: A 2 length vector (e.g. c(0,100)) specifying the lower and upper bounds on the integrated Brier score. If NULL then
+#                 the default is 0 as a lower bound and the max event time of the entire dataset is used as an upper bound. Default is NULL.
+# numBrierPoints: The number of points to evaluate the integrated Brier score. A simple trapezoidal numerical approximation is used. Default
+#                 is 1000 points.
+# Ltype: The type of L1-loss. Must be one of "Uncensored","Hinge", or "Margin". Default is "Margin".
+# Llog: A boolean specifying whether or not to use log-L1 metric. Default is FALSE.
+# typeOneCal: A string indicating the type of 1-Calibrtion to use. Must be one of "DN" or "Uncensored". Default is "DN".
+# oneCalBuckets: An int specifying number of bins for 1-Calibration. Default is 10.
+# survivalPredictionMethod: The way in which to estimate average surival times. Must be one of "Mean" or "Median". Default is "Median".
+# AFTDistribution: The distribution to use for AFT, default is "weibull". Must be one of "weibull","exponential","lognormal","gaussian",
+#                   "loglogistic","logistic".
+# FS: A boolean specifying whether or not to use feature selection. Default is TRUE.
+# imputeZero: A boolean specifying whether 0 valued times should be imputed (AFT breaks for 0 valued times). If TRUE then 0 valued times are
+# imputed to half the minimum non-zero time. Default is TRUE. 
+# verbose: A boolean specifying whether or not to return results and progress information.
+
+
+#Output: A list of (3) items:
+#(1) datasetUsed: This is the dataset that is actually used post feature selection but pre normalization and imputation. datasetUsed
+#will have all the patients who had acceptable time and delta values and the features that were selected.
+#(2) survivalCurves: This is a list containing the survival curves for all patients for each model that was tested. 
+#(3) results: This is a dataframe containing all the evaluation results with specified model and fold number. Additionally the sample size
+#feature size, and censoring percnetage are returned. Notice that the feature sizes before and after one hot encoding are returned. 
+#If none of the features were factors then NumFeatures should equal NumFeaturesOneHot.
+
+#Note that survivalCurves can be plotted by plotSurvivalCurves().
+
+## Function 2: getSurvivalCurves()
+
+# coxTimes, coxENTimes, kmTimes, aftTimes, rsfTimes, mtlrTimes - The times used for prediction of each model.
+# CoxKP = T,CoxKPEN=T, KaplanMeier = T, RSFModel = T, AFTModel = T, MTLRModel =T: The models used in analysisMaster.
+# combinedTestResults: A List containing all model survival curves. 
+# numberOfFolds: Number of folds for cross validation.
+# originalIndexing: The original indexing prior to CV folds.
+
+#Output: The survival curves of all survival models for all test patients.
+
+#Usage: This is a helper function for analysisMaster(). This is used to get the survival curves for each model for each patient.
+
+### Code ##################################################################################################################################
+
+
+#Data processing files:
+source("ValidateCleanCV/validateAndClean.R")
+source("ValidateCleanCV/createFoldsAndNormalize.R")
+
+#Modeling files:
+source("Models/CoxPH_KP.R")
+source("Models/KaplanMeier.R")
+source("Models/RandomSurvivalForests.R")
+source("Models/AcceleratedFailureTime.R")
+source("Models/MTLR.R")
+
+#Evaluation files:
+source("Evaluations/DCalibration.R")
+source("Evaluations/OneCalibration.R")
+source("Evaluations/Concordance.R")
+source("Evaluations/L1Measures.R")
+source("Evaluations/BrierScore.R")
+
+#Misc files:
+source("FeatureSelection/FeatureSelection.R")
+source("Plotting/plotSurvivalCurves.R")
+
+analysisMaster = function(survivalDataset, numberOfFolds =5,
+                          CoxKP = T,CoxKPEN = T, KaplanMeier = T, RSFModel = F, AFTModel = T, MTLRModel =T, #Models
+                          DCal = T, OneCal = T, Concor = T, L1Measure = T, BrierInt = T, BrierSingle = T, #Evaluations
+                          DCalBins = 10, OneCalTime = NULL,  concordanceTies = "Risk", #Evaluation args
+                          SingleBrierTime = NULL, IntegratedBrierTimes = NULL, numBrierPoints = 1000, Ltype = "Margin", #Evaluation args
+                          Llog = F, typeOneCal = "DN", oneCalBuckets = 10, survivalPredictionMethod = "Median", #Evaluation args
+                          AFTDistribution = "weibull", #Model args,
+                          FS = F, imputeZero=T, verbose = T # Misc args
+                          ){
+  validatedData = validateAndClean(survivalDataset, imputeZero)
+  if(FS)
+    validatedData = FeatureSelection(validatedData, type = "UniCox")
+  foldsAndNormalizedData = createFoldsAndNormalize(validatedData, numberOfFolds)
+  originalIndexing = foldsAndNormalizedData[[1]]
+  normalizedData = foldsAndNormalizedData[[2]]
+  evaluationResults = data.frame()
+  combinedTestResults = list(Cox = list(),CoxEN = list(), KM = list(), AFT = list(), RSF = list(), MTLR = list())
+  coxTimes = NULL;coxENTimes = NULL; kmTimes = NULL; rsfTimes = NULL; aftTimes = NULL; mtlrTimes = NULL;
+  for(i in 1:numberOfFolds){
+    if(verbose){
+      print(Sys.time())
+      print(paste("Starting fold",i,"of", numberOfFolds, "total folds."))
+    }
+    #Models - We evaluate values to NULL so we can pass them to evaluations, regardless if the models were ran or not.
+    coxMod = NULL;coxENMod =NULL; kmMod = NULL; rsfMod = NULL; aftMod = NULL; mtlrMod = NULL;
+    training = normalizedData[[1]][[i]]
+    testing = normalizedData[[2]][[i]]
+    if(verbose){
+      print(paste("Beginning model training."))
+    }
+    if(CoxKP){
+      if(verbose){
+      print("Starting Cox Proportional Hazards.")
+      }
+      coxMod = CoxPH_KP(training, testing)
+      if(length(coxMod) ==1){
+        combinedTestResults$Cox = list()
+        coxTimes = NULL
+        CoxKP = F
+        if(i > 1)
+          evaluationResults = with(evaluationResults,evaluationResults[-which(Model == "CoxKP"),])
+      }
+      else{
+        combinedTestResults$Cox[[i]] = coxMod
+        coxTimes = c(coxTimes,coxMod[[1]]$time)
+      }
+    }
+    if(CoxKPEN){
+      if(verbose){
+      print("Starting Cox Proportional Hazards - Elastic Net.")
+      }
+      coxENMod = CoxPH_KP(training, testing,ElasticNet = T)
+      combinedTestResults$CoxEN[[i]] = coxENMod
+      coxENTimes = c(coxENTimes,coxENMod[[1]]$time)
+    }
+    if(KaplanMeier){
+      if(verbose){
+      print("Starting Kaplan Meier.")
+      }
+      kmMod = KM(training, testing)
+      combinedTestResults$KM[[i]] = kmMod
+      kmTimes = c(kmTimes,kmMod[[1]]$time)
+    }
+    if(RSFModel){
+      if(verbose){
+      print("Starting Random Survival Forests.")
+      }
+      rsfMod = RSF(training, testing)
+      combinedTestResults$RSF[[i]] = rsfMod
+      rsfTimes = c(rsfTimes,rsfMod[[1]]$time)
+    }
+    if(AFTModel){
+      if(verbose){
+      print("Starting Accelerated Failure Time.")
+      }
+      aftMod = AFT(training, testing, AFTDistribution)
+      if(length(aftMod)==1){
+          combinedTestResults$AFT = list()
+          aftTimes = NULL
+          AFTModel = F
+          if(i >1)
+            evaluationResults = with(evaluationResults,evaluationResults[-which(Model == "AFT"),])
+        }
+      else{
+          combinedTestResults$AFT[[i]] = aftMod
+          aftTimes = c(aftTimes,aftMod[[1]]$time)
+      }
+    }
+    if(MTLRModel){
+      if(verbose){
+      print("Starting Multi-task Logistic Regression (PSSP).")
+      }
+      mtlrMod = MTLR(training, testing)
+      combinedTestResults$MTLR[[i]] = mtlrMod
+      mtlrTimes = c(mtlrTimes,mtlrMod[[1]]$time)
+    }
+    #Evaluations - Note that if evaluations are passed a NULL value they return a NULL.
+    DCalResults = NULL;OneCalResults = NULL;ConcordanceResults = NULL;
+    BrierResultsInt = NULL;BrierResultsSingle = NULL;L1Results = NULL; L2Results = NULL; 
+    if(Concor){
+      if(verbose){
+      print("Staring Evaluation: Concordance")
+      }
+      coxConc = Concordance(coxMod, concordanceTies,survivalPredictionMethod)
+      coxENConc = Concordance(coxENMod, concordanceTies,survivalPredictionMethod)
+      kmConc = Concordance(kmMod, concordanceTies,survivalPredictionMethod)
+      rsfConc = Concordance(rsfMod, concordanceTies,survivalPredictionMethod)
+      aftConc = Concordance(aftMod, concordanceTies,survivalPredictionMethod)
+      mtlrConc = Concordance(mtlrMod, concordanceTies,survivalPredictionMethod)
+      
+      ConcordanceResults = rbind(coxConc,coxENConc, kmConc, rsfConc, aftConc, mtlrConc)
+    }
+    if(BrierInt){
+      if(verbose){
+      print("Staring Evaluation: Brier Score- Integrated")
+      }
+      coxBrierInt = BrierScore(coxMod, type = "Integrated", numPoints = numBrierPoints, integratedBrierTimes = IntegratedBrierTimes)
+      coxENBrierInt = BrierScore(coxENMod, type = "Integrated", numPoints = numBrierPoints, integratedBrierTimes = IntegratedBrierTimes)
+      kmBrierInt = BrierScore(kmMod, type = "Integrated", numPoints = numBrierPoints, integratedBrierTimes = IntegratedBrierTimes)
+      rsfBrierInt = BrierScore(rsfMod, type = "Integrated",numPoints =  numBrierPoints, integratedBrierTimes = IntegratedBrierTimes)
+      aftBrierInt = BrierScore(aftMod, type = "Integrated", numPoints = numBrierPoints, integratedBrierTimes = IntegratedBrierTimes)
+      mtlrBrierInt = BrierScore(mtlrMod, type = "Integrated", numPoints =  numBrierPoints, integratedBrierTimes = IntegratedBrierTimes)
+      
+      BrierResultsInt = rbind(coxBrierInt,coxENBrierInt, kmBrierInt, rsfBrierInt, aftBrierInt, mtlrBrierInt)
+      
+    }
+    if(BrierSingle){
+      if(verbose){
+      print("Staring Evaluation: Brier Score - Single")
+      }
+      coxBrierSingle = BrierScore(coxMod, type = "Single", singleBrierTime =SingleBrierTime )
+      coxENBrierSingle = BrierScore(coxENMod, type = "Single", singleBrierTime =SingleBrierTime )
+      kmBrierSingle = BrierScore(kmMod, type = "Single", singleBrierTime =SingleBrierTime )
+      rsfBrierSingle = BrierScore(rsfMod, type = "Single", singleBrierTime =SingleBrierTime )
+      aftBrierSingle = BrierScore(aftMod, type = "Single", singleBrierTime =SingleBrierTime )
+      mtlrBrierSingle = BrierScore(mtlrMod, type = "Single", singleBrierTime =SingleBrierTime )
+      
+      BrierResultsSingle = rbind(coxBrierSingle,coxENBrierSingle, kmBrierSingle, rsfBrierSingle, aftBrierSingle, mtlrBrierSingle)
+      
+    }
+    if(L1Measure){
+      if(verbose){
+      print("Staring Evaluation: L1 Loss")
+      }
+      coxL1 = L1(coxMod, Ltype, Llog,survivalPredictionMethod)
+      coxENL1 = L1(coxENMod, Ltype, Llog,survivalPredictionMethod)
+      kmL1 = L1(kmMod, Ltype, Llog,survivalPredictionMethod)
+      rsfL1 = L1(rsfMod, Ltype, Llog,survivalPredictionMethod)
+      aftL1 = L1(aftMod, Ltype, Llog,survivalPredictionMethod)
+      mtlrL1 = L1(mtlrMod, Ltype, Llog,survivalPredictionMethod)
+      
+      L1Results = rbind(coxL1,coxENL1,kmL1,rsfL1,aftL1,mtlrL1)
+    }
+    toAdd = as.data.frame(cbind(ConcordanceResults,
+                                BrierResultsInt, BrierResultsSingle,L1Results))
+    metricsRan = c(Concor,BrierInt,BrierSingle, L1Measure)
+    names(toAdd) = c("Concordance",
+                     "BrierInt","BrierSingle", "L1Loss")[metricsRan]
+    modelsRan = c(CoxKP,CoxKPEN, KaplanMeier, RSFModel, AFTModel, MTLRModel)
+    models = c("CoxKP","CoxKPEN","Kaplan-Meier","RSF","AFT", "MTLR")[modelsRan]
+    if(any(metricsRan)){
+      toAdd = cbind.data.frame(Model = models,FoldNumer = i, toAdd)
+    }else{
+      toAdd = cbind.data.frame(Model = models,FoldNumer = i)
+    }
+    evaluationResults = rbind.data.frame(evaluationResults, toAdd)
+    if(verbose){
+    print(evaluationResults)
+    }
+  }
+  if(DCal){
+    if(verbose){
+    print("Staring Evaluation: Cumulative D-Calibration")
+    }
+    coxDcal = DCalibrationCumulative(combinedTestResults$Cox,DCalBins)
+    coxENDcal = DCalibrationCumulative(combinedTestResults$CoxEN,DCalBins)
+    kmDcal = DCalibrationCumulative(combinedTestResults$KM,DCalBins)
+    rsfDcal = DCalibrationCumulative(combinedTestResults$RSF,DCalBins)
+    aftDcal = DCalibrationCumulative(combinedTestResults$AFT,DCalBins)
+    mtlrDcal = DCalibrationCumulative(combinedTestResults$MTLR,DCalBins)
+    
+    DCalResults = c(coxDcal,coxENDcal, kmDcal, rsfDcal, aftDcal, mtlrDcal)
+    evaluationResults$DCalibration = rep(DCalResults, numberOfFolds)
+  }
+  if(OneCal){
+    if(verbose){
+    print("Staring Evaluation: Cumulative One-Calibration")
+    }
+    cox1cal = OneCalibrationCumulative(combinedTestResults$Cox, OneCalTime, typeOneCal, oneCalBuckets)
+    coxEN1cal = OneCalibrationCumulative(combinedTestResults$CoxEN, OneCalTime, typeOneCal, oneCalBuckets)
+    km1cal = OneCalibrationCumulative(combinedTestResults$KM, OneCalTime, typeOneCal, oneCalBuckets)
+    rsf1cal = OneCalibrationCumulative(combinedTestResults$RSF, OneCalTime, typeOneCal, oneCalBuckets)
+    aft1cal = OneCalibrationCumulative(combinedTestResults$AFT, OneCalTime, typeOneCal, oneCalBuckets)
+    mtlr1cal = OneCalibrationCumulative(combinedTestResults$MTLR, OneCalTime, typeOneCal, oneCalBuckets)
+    
+    numTimes = max(sapply(list(cox1cal,coxEN1cal, km1cal, rsf1cal,aft1cal, mtlr1cal),length))
+    
+    for(times in 1:numTimes){
+      varName = paste("OneCalibration_",times, sep="")
+      assign(varName,c(cox1cal[times],coxEN1cal[times], km1cal[times], rsf1cal[times],aft1cal[times], mtlr1cal[times]))
+      evaluationResults[varName] = rep(eval(parse(text=varName)), numberOfFolds)
+    }
+    if(verbose){
+    print(evaluationResults)
+    }
+  }
+  #We will add some basic information about the dataset.
+  evaluationResults$N = nrow(validatedData)
+  #Note we subtract 2 to not count `time` and `delta`.
+  evaluationResults$NumFeatures = ncol(training) - 2
+  evaluationResults$PercentCensored = sum(!validatedData$delta)/nrow(validatedData)
+  survivalCurves = getSurvivalCurves(coxTimes,coxENTimes, kmTimes, aftTimes, rsfTimes, mtlrTimes,
+                                     CoxKP,CoxKPEN, KaplanMeier, RSFModel, AFTModel, MTLRModel,
+                                     combinedTestResults, numberOfFolds,originalIndexing)
+  names(survivalCurves) = c("Cox","CoxEN","KM","AFT","RSF","MTLR")[c(CoxKP,CoxKPEN, KaplanMeier, AFTModel,RSFModel, MTLRModel)]
+  rownames(evaluationResults) = NULL
+  return(list(datasetUsed = validatedData, survivalCurves = survivalCurves, results = evaluationResults))
+}
+
+
+
+#This function combines survival curves across the folds into one dataframe (we must get predictions for all
+#the times across all folds otherwise we cannot combine patients from different folds into a dataframe.)
+getSurvivalCurves = function(coxTimes,coxENTimes, kmTimes, aftTimes, rsfTimes, mtlrTimes,
+                             CoxKP = T,CoxKPEN=T, KaplanMeier = T, RSFModel = T, AFTModel = T, MTLRModel =T,
+                             combinedTestResults, numberOfFolds, originalIndexing){
+  originalIndexOrder = order(unname(unlist(originalIndexing)))
+  if(!is.null(coxTimes))
+    coxTimes = sort(unique(coxTimes))
+  if(!is.null(coxENTimes))
+    coxENTimes = sort(unique(coxENTimes))
+  if(!is.null(kmTimes))
+    kmTimes = sort(unique(kmTimes))
+  if(!is.null(rsfTimes))
+    rsfTimes = sort(unique(rsfTimes))
+  if(!is.null(aftTimes))
+    aftTimes = sort(unique(aftTimes))
+  if(!is.null(mtlrTimes))
+    mtlrTimes = sort(unique(mtlrTimes))
+  models = c(CoxKP,CoxKPEN, KaplanMeier, AFTModel,RSFModel,MTLRModel)
+  allTimes = list(coxTimes,coxENTimes,kmTimes,aftTimes,rsfTimes,mtlrTimes)
+  survivalCurves = list()
+  count = 0
+  for(j in which(models)){
+    count =count+1
+    fullCurves = data.frame(row.names = 1:length(allTimes[[j]]))
+    for(i in 1:numberOfFolds){
+      #Index method -> fold -> survival curves
+      times = combinedTestResults[[j]][[i]][[1]]$time
+      maxTime = max(times)
+      curves  = combinedTestResults[[j]][[i]][[1]][,-1]
+      timesToEvaluate = setdiff(allTimes[[j]],times)
+      #Here we are going to combine the times from all folds and fit a spline so all patients have predictions for all times
+      #across all folds.
+      fullCurves = cbind.data.frame(fullCurves,sapply(curves,
+                                                      function(x){
+                                                        curveSpline = splinefun(times,x,method='hyman')
+                                                        maxSpline = curveSpline(maxTime)
+                                                        curveSplineConstant = function(time){
+                                                          timeToEval = ifelse(time > maxTime, maxTime,time)
+                                                          toReturn = rep(NA,length(time))
+                                                          toReturn[timeToEval== maxTime] = max(maxSpline,0)
+                                                          toReturn[timeToEval !=maxTime] = curveSpline(timeToEval[timeToEval!=maxTime])
+                                                          return(toReturn)
+                                                        }
+                                                        extraPoints =curveSplineConstant(timesToEvaluate)
+                                                        toReturn = rep(NA, length(allTimes[[j]]))
+                                                        originalIndex = which(!allTimes[[j]] %in% timesToEvaluate)
+                                                        newIndex = which(allTimes[[j]] %in% timesToEvaluate)
+                                                        toReturn[originalIndex] = x
+                                                        toReturn[newIndex] = extraPoints
+                                                        return(toReturn)
+                                                      }
+      ))
+    }
+    fullCurves =  fullCurves[originalIndexOrder]
+    fullCurves = cbind.data.frame(allTimes[j], fullCurves)
+    colnames(fullCurves) = c("time",1:(ncol(fullCurves)-1))
+    survivalCurves[[count]] = fullCurves
+  }
+  return(survivalCurves)
+}
+```
+
+#Finalize data for the interaction model
+```{r}
+PS_vegf = VEGF_analysis
+
+#ensure no duplicates
+PS_vegf = PS_vegf[!duplicated(PS_vegf$Patient_ID),] 
+row.names(PS_vegf) = NULL 
+PS_vegf = tibble::column_to_rownames(PS_vegf, "Patient_ID")
+PS_vegf$vegf_status <- ifelse(PS_vegf$vegf_status == "TRUE", 1, 0)
+PS_vegf$vegf_status =  as.factor(PS_vegf$vegf_status)
+
+#Set up data for MTLR
+PS_vegf_final = PS_vegf
+colnames(PS_vegf_final)[which(names(PS_vegf_final) == "OS_time")] <- "time"
+colnames(PS_vegf_final)[which(names(PS_vegf_final) == "vital_status")] <- "delta"
+PS_vegf_final <- PS_vegf_final %>% mutate(delta = ifelse(delta == "1",0,1))
+row.names(PS_vegf_final) = NULL 
+PS_vegf_final = PS_vegf_final[,c(2:103,126)]
+PS_vegf_final$vegf_status = as.factor(PS_vegf_final$vegf_status)
+```
+```{r}
+#Run validate
+PS_vegf_final = validate(PS_vegf_final, imputeZero = TRUE)
+PS_vegf_final = na.omit(PS_vegf_final)
+```
+
+#All patients WITH F82 only interaction
+```{r}
+####WITH F82 interaction####
+vegf_MTLR_model = mtlr(Surv(time,delta)~ as.matrix(PS_vegf_final[,c(3:83,85:102)]) + F82*vegf_status, data =PS_vegf_final) 
+
+newdata= PS_vegf_final[,c(3:103)]
+newdata_cf= PS_vegf_final[,c(3:103)]
+newdata_cf <- PS_vegf_final %>% mutate(vegf_status = ifelse(vegf_status == "1",0,1))
+newdata_cf$vegf_status = as.factor(newdata_cf$vegf_status)
+
+vegf_MTLR_model_example = predict(vegf_MTLR_model, newdata = newdata)
+names = rownames(newdata)
+names(vegf_MTLR_model_example)[2:(length(names)+1)] <- names
+newdata$index = seq.int(nrow(newdata))
+  
+vegf_MTLR_model_example_cf = predict(vegf_MTLR_model, newdata = newdata_cf)
+names = rownames(newdata_cf)
+names(vegf_MTLR_model_example_cf)[2:(length(names)+1)] <- names
+newdata_cf$index = seq.int(nrow(newdata_cf))
+
+#Calculate predicted survival if all patients received anti-Vegf
+newdata_cf_vegf <- PS_vegf_final %>% mutate(vegf_status = "1")
+vegf_MTLR_model_example_vegf = predict(vegf_MTLR_model, newdata = newdata_cf_vegf)
+
+#Calculate predicted survival if all patients received other therapy
+newdata_cf_other <- PS_vegf_final %>% mutate(vegf_status = "0")
+vegf_MTLR_model_example_other = predict(vegf_MTLR_model, newdata = newdata_cf_other)
+
+#Calculate mean survival time for counterfactual
+output <- list()
+for(i in 2:3258){
+    output[i] <- predictMeanSurvivalTimeSpline(vegf_MTLR_model_example_vegf[,i], vegf_MTLR_model_example_vegf$time)
+}
+
+output_cf <- list()
+for(i in 2:3258){
+    output_cf[i] <- predictMeanSurvivalTimeSpline(vegf_MTLR_model_example_other[,i], vegf_MTLR_model_example_other$time)
+}
+
+output = unlist(output)
+output_cf = unlist(output_cf)
+
+#Difference in survival time calculated as predicted mean survival time of all patients if they received anti-VEGF therapy minus all patients if they received Other therapy
+surv_diff = output-output_cf
+
+plot(newdata_cf_vegf$F82,surv_diff)
+summary(lm(surv_diff~newdata_cf_vegf$F82))
+
+#####Add real life treatment status#####
+vegf_interaction_plotdata = newdata_cf_vegf
+vegf_interaction_plotdata$surv_diff = surv_diff
+vegf_interaction_plotdata = tibble::rownames_to_column(vegf_interaction_plotdata, "Patient_ID")
+true_status = tibble::rownames_to_column(PS_vegf_final, "Patient_ID")
+true_status = dplyr::select(true_status, c("Patient_ID", "vegf_status"))
+vegf_interaction_plotdata = merge(true_status, vegf_interaction_plotdata, by = "Patient_ID")
+vegf_interaction_plotdata = vegf_interaction_plotdata[order(vegf_interaction_plotdata$vegf_status.x, decreasing = FALSE),]  
+vegf_interaction_plotdata$surv_diff = vegf_interaction_plotdata$surv_diff/365.25
+vegf_interaction_plotdata$F82_scale = (vegf_interaction_plotdata$F82-min(vegf_interaction_plotdata$F82))/(max(vegf_interaction_plotdata$F82) - min(vegf_interaction_plotdata$F82))
+
+summary(lm(surv_diff ~ F82_scale, data=vegf_interaction_plotdata))
+
+#////////////////Simulation interval 
+
+summary(lm(surv_diff~F82_scale,data = vegf_interaction_plotdata))
+
+G1 <- gam(surv_diff ~ s(F82_scale, k = -1, bs = "cs"), data = vegf_interaction_plotdata) 
+plot(G1,pages=1,seWithMean=TRUE) ## `with intercept' CIs
+gam.check(G1)
+summary(G1)
+
+m = gam(surv_diff ~ s(F82_scale, k = -1, bs = "cs"), data = vegf_interaction_plotdata) 
+
+rmvn <- function(n, mu, sig) { ## MVN random deviates
+    L <- mroot(sig)
+    m <- ncol(L)
+    t(mu + L %*% matrix(rnorm(m*n), m, n))
+}
+
+Vb <- vcov.gam(m)
+newd <- with(vegf_interaction_plotdata, data.frame(F82_scale = seq(min(F82_scale), max(F82_scale), length = 1000)))
+pred <- predict(m, newd, se.fit = TRUE)
+se.fit <- pred$se.fit
+
+set.seed(42)
+N <- 100000
+
+BUdiff <- rmvn(N, mu = rep(0, nrow(Vb)), sig = Vb)
+Cg <- predict(m, newd, type = "lpmatrix")
+simDev <- Cg %*% t(BUdiff)
+absDev <- abs(sweep(simDev, 1, se.fit, FUN = "/"))
+masd <- apply(absDev, 2L, max)
+crit <- quantile(masd, prob = 0.95, type = 8)
+
+pred <- transform(cbind(data.frame(pred), newd),
+                  uprP = fit + (2 * se.fit),
+                  lwrP = fit - (2 * se.fit),
+                  uprS = fit + (crit * se.fit),
+                  lwrS = fit - (crit * se.fit))
+
+sims <- rmvn(N, mu = coef(m), sig = Vb)
+fits <- Cg %*% t(sims)
+
+nrnd <- 1000
+rnd <- sample(N, nrnd)
+stackFits <- stack(as.data.frame(fits[, rnd]))
+stackFits <- transform(stackFits, F82_scale = rep(newd$F82_scale, length(rnd)))
+
+#Figure in final publication
+ite_vegf_all_plot = ggplot() + 
+  geom_point(data = vegf_interaction_plotdata, aes(x=F82_scale, y=surv_diff, colour = vegf_status.x), alpha=0.5, size = 3) +
+   geom_path(data = stackFits, mapping = aes(y = values, x = F82_scale, group = ind),
+              alpha = 0.01, colour = "gray40") + 
+    geom_path(lwd = 2) +
+      geom_smooth (alpha=0.3, size=0, span=0.5,colour ="darkgray", linetype=0,aes(colour=NULL)) + 
+      stat_smooth (geom="line", alpha=0.3, size=1.5,colour = "darkgray", span=0.5,aes(colour=NULL)) +
+      scale_y_continuous(name= "Survival Difference (Years)", breaks = c(-3,0,3,6,9,12), labels = c(-3,0,3,6,9,12), limits = c(-3,12)) +
+  scale_colour_manual(name="Ground truth VEGF Status",labels = c("Other (n=3160)", "anti-VEGF (n=97)"), values = c("skyblue3","red")) + 
+  ggtitle("Individual Treatment Effect of anti-VEGF therapy") +
+      xlab("Scaled Factor 82") + 
+      ylab("Survival Difference (Years)")  +
+      theme_classic() +
+                theme(panel.grid.major.y = element_line(colour = "gray", size = 0.15)) +
+                theme(panel.grid.minor.y = element_line(colour = "gray", size = 0.1)) +
+                theme(panel.grid.major.x = element_line(colour = "gray", size = 0.15)) +
+                theme(panel.grid.minor.x = element_line(colour = "gray", size = 0.1)) +
+                theme(axis.text.x = element_text(colour="black", size = 13)) +
+                theme(axis.text.y = element_text(colour="black",size = 13)) + 
+                theme(plot.title = element_text(colour="black", size=13,hjust = 0, vjust=0)) +
+                theme(axis.title.x = element_text(colour="black", size =13, vjust = 0.05)) +
+                theme(axis.title.y = element_text(colour="black", size=13)) +
+                theme(legend.title = element_text(color = "black", size = 13),
+                      legend.text = element_text(color = "black", size = 13),
+                      legend.position = c(0.3,0.8),
+                      legend.background = element_rect(size=0.5, linetype="solid",colour ="black", fill=alpha("white",0.7)))
+
+ggsave("ite_vegf_all_plot_new.png", ite_vegf_all_plot, width=5, height=4)
+ggsave("ite_vegf_all_plot_new.svg", ite_vegf_all_plot, width=5, height=4)
+
+```
+
+#Interaction model
+```{r}
+####WITH F82 interaction####
+vegf_MTLR_model = mtlr(Surv(time,delta)~ as.matrix(PS_vegf_final[,c(3:83,85:102)]) + F82*vegf_status, data =PS_vegf_final) 
+
+newdata= PS_vegf_final[,c(3:103)]
+newdata_cf= PS_vegf_final[,c(3:103)]
+newdata_cf <- PS_vegf_final %>% mutate(vegf_status = ifelse(vegf_status == "1",0,1))
+newdata_cf$vegf_status = as.factor(newdata_cf$vegf_status)
+
+vegf_MTLR_model_example = predict(vegf_MTLR_model, newdata = newdata)
+names = rownames(newdata)
+names(vegf_MTLR_model_example)[2:(length(names)+1)] <- names
+newdata$index = seq.int(nrow(newdata))
+  
+```
+```{r}
+output_plain <- list()
+for(i in 2:3258){
+    output_plain[i] <- predictMeanSurvivalTimeSpline(vegf_MTLR_model_example[,i], vegf_MTLR_model_example$time)
+}
+
+output_plain = unlist(output_plain)
+
+cate_interaction = newdata
+cate_interaction$survival_time = output_plain
+
+#Here we will model the interaction effect of vegf treatment with survival time as a function of factor 82 score. the mean survival times from the MTLR model are extracted. We use generalized additive models to visualize these outcomes. As opposed to plotting the point-wise confidence intervals we instead employ the uses of sampling from the multivariate normal distribution to visualize the simultaneous confidence interval (the interval of 95% of fit splines as opposed to the data points). We then create 1000 splines sampled from the posterior distribution.We plot these simulations to visualize the range of variation in splines generated from our model (see : https://fromthebottomoftheheap.net/2016/12/15/simultaneous-interval-revisited/)
+
+```
+#Interval plot vegf status gam
+```{r}
+cate_interaction$F82_scale = (cate_interaction$F82-min(cate_interaction$F82))/(max(cate_interaction$F82) - min(cate_interaction$F82))
+
+m1_vegf_pos = gam(survival_time ~ s(F82_scale, k = -1, bs = "cs"), data = cate_interaction[cate_interaction$vegf_status=="1",]) 
+
+rmvn <- function(n, mu, sig) { ## MVN random deviates
+    L <- mroot(sig)
+    m <- ncol(L)
+    t(mu + L %*% matrix(rnorm(m*n), m, n))
+}
+
+Vb <- vcov.gam(m1_vegf_pos)
+newd <- with(cate_interaction[cate_interaction$vegf_status=="1",], data.frame(F82_scale = seq(min(F82_scale), max(F82_scale), length = 500)))
+pred <- predict(m1_vegf_pos, newd, se.fit = TRUE)
+se.fit <- pred$se.fit
+
+set.seed(42)
+N <- 10000
+
+BUdiff <- rmvn(N, mu = rep(0, nrow(Vb)), sig = Vb)
+Cg <- predict(m1_vegf_pos, newd, type = "lpmatrix")
+simDev <- Cg %*% t(BUdiff)
+absDev <- abs(sweep(simDev, 1, se.fit, FUN = "/"))
+masd <- apply(absDev, 2L, max)
+crit <- quantile(masd, prob = 0.95, type = 8)
+
+pred_vegf_pos <- transform(cbind(data.frame(pred), newd),
+                  uprP = fit + (2 * se.fit),
+                  lwrP = fit - (2 * se.fit),
+                  uprS = fit + (crit * se.fit),
+                  lwrS = fit - (crit * se.fit))
+
+sims <- rmvn(N, mu = coef(m1_vegf_pos), sig = Vb)
+fits <- Cg %*% t(sims)
+
+nrnd <- 1000
+rnd <- sample(N, nrnd)
+stackFits <- stack(as.data.frame(fits[, rnd]))
+stackFits_vegf_pos <- transform(stackFits, F82_scale = rep(newd$F82_scale, length(rnd)))
+
+#Calculate 95% intervals
+inCI <- function(x, upr, lwr) {
+    all(x >= lwr & x <= upr)
+}
+fitsInPCI <- apply(fits, 2L, inCI, upr = pred_vegf_pos$uprP, lwr = pred_vegf_pos$lwrP)
+fitsInSCI <- apply(fits, 2L, inCI, upr = pred_vegf_pos$uprS, lwr = pred_vegf_pos$lwrS)
+
+sum(fitsInPCI) / length(fitsInPCI)      # Point-wise
+sum(fitsInSCI) / length(fitsInSCI)      # Simultaneous
+
+####
+m1_vegf_neg = gam(survival_time ~ s(F82_scale, k = -1, bs = "cs"), data = cate_interaction[cate_interaction$vegf_status=="0",]) 
+
+rmvn <- function(n, mu, sig) { ## MVN random deviates
+    L <- mroot(sig)
+    m <- ncol(L)
+    t(mu + L %*% matrix(rnorm(m*n), m, n))
+}
+
+Vb <- vcov.gam(m1_vegf_neg)
+newd <- with(cate_interaction[cate_interaction$vegf_status=="0",], data.frame(F82_scale = seq(min(F82_scale), max(F82_scale), length = 500)))
+pred <- predict(m1_vegf_neg, newd, se.fit = TRUE)
+se.fit <- pred$se.fit
+
+set.seed(42)
+N <- 10000
+
+BUdiff <- rmvn(N, mu = rep(0, nrow(Vb)), sig = Vb)
+Cg <- predict(m1_vegf_neg, newd, type = "lpmatrix")
+simDev <- Cg %*% t(BUdiff)
+absDev <- abs(sweep(simDev, 1, se.fit, FUN = "/"))
+masd <- apply(absDev, 2L, max)
+crit <- quantile(masd, prob = 0.95, type = 8)
+
+pred_vegf_neg <- transform(cbind(data.frame(pred), newd),
+                  uprP = fit + (2 * se.fit),
+                  lwrP = fit - (2 * se.fit),
+                  uprS = fit + (crit * se.fit),
+                  lwrS = fit - (crit * se.fit))
+
+sims <- rmvn(N, mu = coef(m1_vegf_neg), sig = Vb)
+fits <- Cg %*% t(sims)
+
+nrnd <- 1000
+rnd <- sample(N, nrnd)
+stackFits <- stack(as.data.frame(fits[, rnd]))
+stackFits_vegf_neg <- transform(stackFits, F82_scale = rep(newd$F82_scale, length(rnd)))
+
+#Calculate 95% intervals
+inCI <- function(x, upr, lwr) {
+    all(x >= lwr & x <= upr)
+}
+fitsInPCI <- apply(fits, 2L, inCI, upr = pred_vegf_neg$uprP, lwr = pred_vegf_neg$lwrP)
+fitsInSCI <- apply(fits, 2L, inCI, upr = pred_vegf_neg$uprS, lwr = pred_vegf_neg$lwrS)
+
+sum(fitsInPCI) / length(fitsInPCI)      # Point-wise
+sum(fitsInSCI) / length(fitsInSCI)      # Simultaneous
+
+```
+#Simulations GGPLOT
+```{r}
+cate_interaction_plotdata = cate_interaction[order(cate_interaction$vegf_status, decreasing = FALSE),]  
+cate_interaction_plotdata$survival_time = cate_interaction_plotdata$survival_time/365.25
+cate_interaction_plotdata$F82_scale = (cate_interaction_plotdata$F82-min(cate_interaction_plotdata$F82))/(max(cate_interaction_plotdata$F82) - min(cate_interaction_plotdata$F82))
+
+pred_vegf_neg_plotdata = stackFits_vegf_neg
+pred_vegf_neg_plotdata$values = pred_vegf_neg_plotdata$values/365.25
+
+  
+pred_vegf_pos_plotdata = stackFits_vegf_pos
+pred_vegf_pos_plotdata$values = pred_vegf_pos_plotdata$values/365.25
+
+
+##/////////////PLOT for interaction effect
+model_interaction = ggplot() + 
+    geom_point(data = cate_interaction_plotdata, aes(x=F82_scale, y=survival_time, colour = vegf_status), alpha=0.5, size = 3) +
+    geom_path(data = pred_vegf_neg_plotdata, mapping = aes(y = values, x = F82_scale, group = ind),alpha = 0.01, colour = "gray40") + 
+    geom_path(data = pred_vegf_pos_plotdata, mapping = aes(y = values, x = F82_scale, group = ind),alpha = 0.01, colour = "gray40") + 
+    geom_path(lwd = 2) +
+    geom_smooth(data = cate_interaction_plotdata, aes(x=F82_scale, y=survival_time, colour=vegf_status),alpha=0.6, size=0, span=0.5, linetype=0, method="gam", se=FALSE) + 
+    stat_smooth (data = cate_interaction_plotdata, aes(x=F82_scale, y=survival_time, colour=vegf_status), geom="line", alpha=0.6, size=1.5, span=0.5)+
+    scale_colour_manual(name="Ground truth VEGF Status",labels = c("Other (n=3160)", "anti-VEGF (n=97)"), values = c("skyblue3","red")) + 
+    ylim(0,22) + #Years of survival
+    ggtitle("Model Interaction Effect") +
+      xlab("Scaled Factor 82") + 
+      ylab("Mean Predicted Survival")  +
+      theme_classic() +
+                theme(panel.grid.major.y = element_line(colour = "gray", size = 0.15)) +
+                theme(panel.grid.minor.y = element_line(colour = "gray", size = 0.1)) +
+                theme(panel.grid.major.x = element_line(colour = "gray", size = 0.15)) +
+                theme(panel.grid.minor.x = element_line(colour = "gray", size = 0.1)) +
+                theme(axis.text.x = element_text(colour="black", size = 13)) +
+                theme(axis.text.y = element_text(colour="black",size = 13)) + 
+                theme(plot.title = element_text(colour="black", size=13,hjust = 0, vjust=0)) +
+                theme(axis.title.x = element_text(colour="black", size =13, vjust = 0.05)) +
+                theme(axis.title.y = element_text(colour="black", size=13)) +
+                theme(legend.title = element_text(color = "black", size = 13),
+                      legend.text = element_text(color = "black", size = 13),
+                      legend.position = c(0.4,0.8),
+                      legend.background = element_rect(size=0.5, linetype="solid",colour ="black", fill=alpha("white",0.7)))
+
+
+ggsave("model_interaction_new.png", model_interaction, width=5, height=4)
+ggsave("model_interaction_new.svg", model_interaction, width=5, height=4)
+```
+
