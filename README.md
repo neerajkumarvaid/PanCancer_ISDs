@@ -1,5 +1,5 @@
 # PanCancer_ISDs
-This repository contains the code and data to reproduce the results of our work on pancancer survival prediction from whole transcriptome data. 
+This repository contains the code and data to reproduce the results of our work on pancancer survival prediction from whole transcriptome data. [Click here](https://drive.google.com/drive/folders/1ucZaqLn4zx12qM-uOnLPRhKsFuvm2nAB?usp=sharing) to download the data used in our paper.
 
  **Folder** | **Description** |
 | ------------- | ------------- |
