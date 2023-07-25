@@ -9,3 +9,5 @@ This repository contains the code and data to reproduce the results of our work 
 All code and data are released under [creative commons license CC BY-NC](https://creativecommons.org/licenses/) for non-commercial use. Please cite the following paper if you use our code and curated data.
 
 Kumar et al. "Learning Individual Survival Models from PanCancer Whole Transcriptome Data – A Step Towards Personalised Medicine", accepted in Clinical Cancer Research, June 2023
+
+![alt text](https://github.com/neerajkumarvaid/PanCancer_ISDs/blob/main/graphical%20abstract.png)
